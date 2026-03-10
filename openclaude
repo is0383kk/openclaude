@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""OpenClaude CLI entry point script."""
+import os
+import sys
+
+# Add project root to sys.path so `src` package is importable
+_DIR = os.path.dirname(os.path.abspath(__file__))
+if _DIR not in sys.path:
+    sys.path.insert(0, _DIR)
+
+from src.cli import main
+
+if __name__ == "__main__":
+    main()
