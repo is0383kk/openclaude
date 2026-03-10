@@ -1,0 +1,349 @@
+"""
+OpenClaude CLI - argument parsing and command execution.
+
+Commands:
+    openclaude start
+    openclaude stop
+    openclaude restart
+    openclaude status
+    openclaude sessions
+    openclaude [--session-id ID] --message TEXT
+    openclaude [--session-id ID] -m TEXT
+"""
+import argparse
+import asyncio
+import json
+import sys
+import time
+from typing import Optional
+
+try:
+    from .config import DEFAULT_SESSION_ID, PID_FILE, SESSIONS_JSON, SOCKET_PATH
+    from .daemon import get_daemon_status, start_daemon_process, stop_daemon_process
+    from .session_store import SessionMeta, SessionStore
+except ImportError:
+    import os
+    _pkg_root = str(__import__("pathlib").Path(__file__).parent.parent)
+    if _pkg_root not in sys.path:
+        sys.path.insert(0, _pkg_root)
+    from src.config import DEFAULT_SESSION_ID, PID_FILE, SESSIONS_JSON, SOCKET_PATH
+    from src.daemon import get_daemon_status, start_daemon_process, stop_daemon_process
+    from src.session_store import SessionMeta, SessionStore
+
+_CRAB = "🦀"
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    cli = OpenClaudeCLI()
+    cli.run()
+
+
+# ---------------------------------------------------------------------------
+# CLI class
+# ---------------------------------------------------------------------------
+
+class OpenClaudeCLI:
+
+    def run(self) -> None:
+        parser = self._build_parser()
+        args = parser.parse_args()
+
+        if args.command == "start":
+            self.cmd_start()
+        elif args.command == "stop":
+            self.cmd_stop()
+        elif args.command == "restart":
+            self.cmd_restart()
+        elif args.command == "status":
+            self.cmd_status()
+        elif args.command == "sessions":
+            asyncio.run(self.cmd_sessions())
+        elif args.message is not None:
+            asyncio.run(self.cmd_message(args.session_id, args.message))
+        else:
+            parser.print_help()
+
+    def _build_parser(self) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(
+            prog="openclaude",
+            description="OpenClaude - Resident AI Agent System",
+        )
+
+        subparsers = parser.add_subparsers(dest="command")
+        subparsers.add_parser("start", help="Start the OpenClaude daemon")
+        subparsers.add_parser("stop", help="Stop the OpenClaude daemon")
+        subparsers.add_parser("restart", help="Restart the OpenClaude daemon")
+        subparsers.add_parser("status", help="Show daemon status")
+        subparsers.add_parser("sessions", help="List conversation sessions")
+
+        # Conversation mode
+        parser.add_argument(
+            "--session-id",
+            default=DEFAULT_SESSION_ID,
+            metavar="SESSION_ID",
+            help=f"Session identifier (default: {DEFAULT_SESSION_ID})",
+        )
+        parser.add_argument(
+            "--message",
+            "-m",
+            default=None,
+            metavar="MESSAGE",
+            help="Message to send to the agent",
+        )
+        return parser
+
+    # ------------------------------------------------------------------
+    # Daemon management commands
+    # ------------------------------------------------------------------
+
+    def cmd_start(self) -> None:
+        status, pid = get_daemon_status()
+        if status == "running":
+            print(f"OpenClaude is already running (PID: {pid})")
+            return
+
+        if status == "stale":
+            print(f"Removing stale PID file (PID: {pid} is dead)...")
+            PID_FILE.unlink(missing_ok=True)
+
+        print("Starting OpenClaude daemon...")
+        start_daemon_process()
+
+        # Wait for socket to appear (max 15 seconds)
+        for _ in range(150):
+            time.sleep(0.1)
+            if SOCKET_PATH.exists():
+                status, pid = get_daemon_status()
+                if status == "running":
+                    print(f"OpenClaude started (PID: {pid})")
+                    return
+
+        print("ERROR: Daemon did not start in time. Check daemon.log for details.", file=sys.stderr)
+        sys.exit(1)
+
+    def cmd_stop(self) -> None:
+        status, pid = get_daemon_status()
+        if status == "stopped":
+            print("OpenClaude is not running.")
+            return
+
+        print("Stopping OpenClaude daemon...")
+        ok = stop_daemon_process()
+        if ok:
+            # Wait for socket to disappear (max 5 seconds)
+            for _ in range(50):
+                time.sleep(0.1)
+                if not SOCKET_PATH.exists():
+                    break
+            print("OpenClaude stopped.")
+        else:
+            print("ERROR: Failed to stop OpenClaude.", file=sys.stderr)
+            sys.exit(1)
+
+    def cmd_restart(self) -> None:
+        self.cmd_stop()
+        time.sleep(0.5)
+        self.cmd_start()
+
+    def cmd_status(self) -> None:
+        status, pid = get_daemon_status()
+        if status == "running":
+            print(f"OpenClaude is running (PID: {pid})")
+        elif status == "stale":
+            print(f"OpenClaude has a stale PID file (PID: {pid}, process not found).")
+        else:
+            print("OpenClaude is stopped.")
+
+    # ------------------------------------------------------------------
+    # Session commands
+    # ------------------------------------------------------------------
+
+    async def cmd_sessions(self) -> None:
+        """Fetch session list from daemon and display as table."""
+        sessions = await self._fetch_sessions()
+
+        print(f"{_CRAB} OpenClaude\n")
+        print(f"Session store: {SESSIONS_JSON}")
+
+        if not sessions:
+            print("Sessions listed: 0")
+            return
+
+        print(f"Sessions listed: {len(sessions)}\n")
+
+        # Table header
+        col_id = max(len(s["session_id"]) for s in sessions)
+        col_id = max(col_id, 10)
+        col_age = 9
+        col_model = max((len(_short_model(s.get("model") or "")) for s in sessions), default=0)
+        col_model = max(col_model, 20)
+
+        header = (
+            f"{'session-id':<{col_id}}  "
+            f"{'Age':<{col_age}}  "
+            f"{'Model':<{col_model}}  "
+            f"Tokens (ctx %)"
+        )
+        print(header)
+
+        for s in sessions:
+            age = SessionStore.format_age(s.get("last_active_at", ""))
+            model_short = _short_model(s.get("model") or "")
+            meta_obj = _dict_to_meta(s)
+            tokens = SessionStore.format_tokens(meta_obj)
+            row = (
+                f"{s['session_id']:<{col_id}}  "
+                f"{age:<{col_age}}  "
+                f"{model_short:<{col_model}}  "
+                f"{tokens}"
+            )
+            print(row)
+
+    async def _fetch_sessions(self) -> list[dict]:
+        """Connect to daemon and retrieve session list."""
+        if not self._is_daemon_up():
+            # If daemon not running, read directly from sessions.json
+            store = SessionStore()
+            await store.load()
+            sessions_meta = await store.list_sessions()
+            return [
+                {
+                    "session_id": s.session_id,
+                    "sdk_session_id": s.sdk_session_id,
+                    "model": s.model,
+                    "created_at": s.created_at,
+                    "last_active_at": s.last_active_at,
+                    "total_input_tokens": s.total_input_tokens,
+                    "total_output_tokens": s.total_output_tokens,
+                    "context_window": s.context_window,
+                    "num_turns": s.num_turns,
+                }
+                for s in sessions_meta
+            ]
+
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+            writer.write((json.dumps({"type": "sessions"}) + "\n").encode("utf-8"))
+            await writer.drain()
+
+            response = await self._read_json(reader)
+            writer.close()
+            await writer.wait_closed()
+
+            if response.get("type") == "sessions_list":
+                return response.get("sessions", [])
+            return []
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # Message command
+    # ------------------------------------------------------------------
+
+    async def cmd_message(self, session_id: str, message: str) -> None:
+        """Send a message to the agent and stream the response."""
+        # Auto-start daemon if not running
+        if not self._is_daemon_up():
+            print("Starting OpenClaude daemon...")
+            start_daemon_process()
+            # Wait for socket
+            for _ in range(150):
+                await asyncio.sleep(0.1)
+                if SOCKET_PATH.exists():
+                    break
+            else:
+                print(
+                    "ERROR: Daemon did not start. Check daemon.log for details.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+        except (FileNotFoundError, ConnectionRefusedError) as e:
+            print(f"ERROR: Cannot connect to daemon: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            # Print header
+            print(f"{_CRAB} OpenClaude\uff08{session_id}\uff09")
+            print("\u2502")
+            print("\u25c7")
+
+            # Send request
+            request = {"type": "query", "session_id": session_id, "message": message}
+            writer.write((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
+            await writer.drain()
+
+            # Stream response
+            while True:
+                response = await self._read_json(reader)
+                resp_type = response.get("type")
+
+                if resp_type == "chunk":
+                    text = response.get("text", "")
+                    print(text, end="", flush=True)
+
+                elif resp_type == "done":
+                    print()  # Final newline
+                    break
+
+                elif resp_type == "error":
+                    print()
+                    print(f"ERROR: {response.get('message')}", file=sys.stderr)
+                    sys.exit(1)
+
+                else:
+                    # Unknown type - ignore
+                    pass
+
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _is_daemon_up(self) -> bool:
+        status, _ = get_daemon_status()
+        return status == "running"
+
+    async def _read_json(self, reader: asyncio.StreamReader) -> dict:
+        line = await reader.readline()
+        if not line:
+            return {}
+        return json.loads(line.decode("utf-8").strip())
+
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
+def _short_model(model: str) -> str:
+    """Shorten model names like 'us.anthropic.claude-sonnet-4-6' → 'claude-sonnet-4-6'."""
+    if not model:
+        return ""
+    if "claude-" in model:
+        idx = model.index("claude-")
+        return model[idx:]
+    return model
+
+
+def _dict_to_meta(d: dict):
+    """Convert sessions_list dict entry to a SessionMeta-like object for formatting."""
+    return SessionMeta(
+        session_id=d.get("session_id", ""),
+        sdk_session_id=d.get("sdk_session_id"),
+        model=d.get("model"),
+        created_at=d.get("created_at", ""),
+        last_active_at=d.get("last_active_at", ""),
+        total_input_tokens=d.get("total_input_tokens", 0),
+        total_output_tokens=d.get("total_output_tokens", 0),
+        context_window=d.get("context_window", 200000),
+        num_turns=d.get("num_turns", 0),
+    )
