@@ -1,4 +1,5 @@
 """OpenClaude configuration constants."""
+
 from pathlib import Path
 
 BASE_DIR: Path = Path.home() / ".openclaude"

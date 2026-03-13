@@ -1,11 +1,11 @@
-"""Session persistence: sessions.json metadata + per-session JSONL logs."""
+"""セッション永続化: sessions.json メタデータ + セッション別 JSONL ログ。"""
+
 import asyncio
 import json
 import os
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Optional
 
 from .config import CONTEXT_WINDOW, SESSIONS_DIR, SESSIONS_JSON
@@ -13,6 +13,8 @@ from .config import CONTEXT_WINDOW, SESSIONS_DIR, SESSIONS_JSON
 
 @dataclass
 class SessionMeta:
+    """セッションのメタデータを保持するデータクラス。"""
+
     session_id: str
     sdk_session_id: Optional[str]
     model: Optional[str]
@@ -25,14 +27,15 @@ class SessionMeta:
 
 
 class SessionStore:
-    """Manages session metadata (sessions.json) and JSONL conversation logs."""
+    """sessions.json メタデータと JSONL 会話ログを管理するクラス。"""
 
     def __init__(self) -> None:
+        """ロックと空のセッション辞書を初期化する。"""
         self._lock = asyncio.Lock()
         self._sessions: dict[str, SessionMeta] = {}
 
     async def load(self) -> None:
-        """Load sessions.json on daemon startup. Creates directory if needed."""
+        """デーモン起動時に sessions.json を読み込む。ディレクトリが存在しない場合は作成する。"""
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         if SESSIONS_JSON.exists():
             try:
@@ -43,7 +46,7 @@ class SessionStore:
                 self._sessions = {}
 
     async def save(self) -> None:
-        """Atomically write sessions.json (tmpfile -> rename)."""
+        """sessions.json をアトミックに書き込む（tmpfile -> rename）。"""
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         data = {alias: asdict(meta) for alias, meta in self._sessions.items()}
         fd, tmp_path = tempfile.mkstemp(dir=str(SESSIONS_DIR), suffix=".tmp")
@@ -54,19 +57,22 @@ class SessionStore:
         except Exception:
             try:
                 os.unlink(tmp_path)
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
             raise
 
     async def get_session(self, alias: str) -> Optional[SessionMeta]:
+        """エイリアスに対応するセッションメタデータを返す。存在しない場合は None を返す。"""
         return self._sessions.get(alias)
 
     async def upsert_session(self, meta: SessionMeta) -> None:
+        """セッションメタデータを追加または更新し、sessions.json に保存する。"""
         async with self._lock:
             self._sessions[meta.session_id] = meta
             await self.save()
 
     async def list_sessions(self) -> list[SessionMeta]:
+        """全セッションのメタデータ一覧を返す。"""
         return list(self._sessions.values())
 
     async def append_message(
@@ -80,7 +86,7 @@ class SessionStore:
         output_tokens: int = 0,
         stop_reason: Optional[str] = None,
     ) -> None:
-        """Append one line to the session's JSONL file."""
+        """セッションの JSONL ファイルに1行追記する。"""
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         jsonl_path = SESSIONS_DIR / f"{session_id}.jsonl"
         now = datetime.now(timezone.utc).isoformat()
@@ -103,7 +109,7 @@ class SessionStore:
 
     @staticmethod
     def format_age(last_active_at: str) -> str:
-        """Convert ISO timestamp to human-readable age like '12m ago'."""
+        """ISO タイムスタンプを '12m ago' のような人間が読みやすい形式に変換する。"""
         try:
             then = datetime.fromisoformat(last_active_at)
             if then.tzinfo is None:
@@ -123,7 +129,7 @@ class SessionStore:
 
     @staticmethod
     def format_tokens(meta: "SessionMeta") -> str:
-        """Format token usage like '7.7k/200k (3%)'."""
+        """トークン使用量を '7.7k/200k (3%)' の形式でフォーマットする。"""
         total = meta.total_input_tokens + meta.total_output_tokens
         ctx = meta.context_window or CONTEXT_WINDOW
         pct = int(total / ctx * 100) if ctx > 0 else 0
