@@ -1,13 +1,17 @@
+> [!WARNING]
+> このリポジトリは開発途中です。ソースコードや各種ドキュメントは不完全です。
+> This repository is under development. The source code and documentation are incomplete.
+
 # OpenClaude
 
-claude-agent-sdk を使った常駐型 AI エージェントシステム。
-Unix ソケットサーバーとして常駐し、セッション履歴を保持したまま会話を継続できます。
+claude-agent-sdk を使った常駐型 AI エージェントシステム  
+Unix ソケットサーバーとして常駐し OpenClaw のように24時間稼働し続けます
 
 ---
 
 ## 動作環境
 
-- OS: Ubuntu 24.04 (WSL2)
+- OS: Linux（Ubuntu 24.04で動作確認済み）
 - Python: 3.10 以上
 - `claude-agent-sdk` v0.1.48 以上
 
@@ -15,33 +19,37 @@ Unix ソケットサーバーとして常駐し、セッション履歴を保持
 
 ## セットアップ
 
-### 1. 依存ライブラリのインストール
+### 1. プロジェクトの配置
+
+`/home/ユーザ名/.openclaude`となるようにプロジェクトを配置する
+
+### 2. 依存ライブラリのインストール
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 設定ファイルの確認
+### 3. 設定ファイルの確認
 
-`.claude/settings.json` に AWS Bedrock の認証情報とモデル設定が記載されています。
-`setting_sources=["project"]` によって、デーモン起動時にこのファイルが自動的に読み込まれます。
+`.claude/settings.json` に 必要な項目を追記  
+`ClaudeAgentOptions`の`setting_sources=["project"]` により、デーモン起動時にこのファイルが自動的に読み込まれます。
 
-```
+```json
 .openclaude/
 └── .claude/
-    └── settings.json   # AWS_BEARER_TOKEN_BEDROCK, CLAUDE_CODE_USE_BEDROCK, model 等
+    └── settings.json
 ```
 
-### 3. PATH の設定
+### 4. PATH の設定
 
 ```bash
 echo 'export PATH="$HOME/.openclaude:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### 4. systemd サービスの登録（任意）
+### 5. systemd サービスの登録（任意）
 
-`systemctl` コマンドで起動・停止したい場合は以下を実行してください。
+`systemctl` コマンドで起動・停止したい場合は以下を実行してください。  
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -154,55 +162,18 @@ openclaude --session-id main --message "私の名前はなんでしたか？"
 ### セッション一覧の確認
 
 ```bash
-openclaude sessions
-```
-
-```
+$ openclaude sessions
 🦀 OpenClaude
 
-Session store: /home/is0383kk/.openclaude/sessions/sessions.json
-Sessions listed: 1
+Sessions: 1
+Sessions Path: /home/ユーザ名/.claude/projects/-home-ユーザ名--openclaude
 
-session-id  Age      Model                    Tokens (ctx %)
-main        12m ago  claude-sonnet-4-6        7.7k/200k (3%)
+session-id  sdk_session_id                        last_active               total_tokens
+main        XXXXXXXXXXXXXXXXXXX  2026-03-13T17:49:54.126Z  5743
 ```
 
 ### セッションデータの保存場所
 
-| ファイル | 内容 |
-|---|---|
-| `sessions/sessions.json` | 全セッションのメタデータ（モデル・トークン数・最終更新時刻） |
-| `sessions/{session-id}.jsonl` | セッションごとの会話ログ（JSONL 形式） |
-
----
-
-## ログの確認
-
-デーモンの動作ログは以下のファイルに出力されます。
-
-```bash
-cat ~/.openclaude/daemon.log
-```
-
----
-
-## アーキテクチャ
-
-```
-openclaude CLI
-    │
-    │  JSON over Unix Socket
-    │  (~/.openclaude/openclaude.sock)
-    ▼
-OpenClaude Daemon (asyncio)
-    │
-    │  claude_agent_sdk.query()
-    │  setting_sources=["project"]
-    │  resume=sdk_session_id
-    ▼
-claude-agent-sdk → AWS Bedrock (Claude)
-```
-
-- **CLI** がメッセージをソケット経由でデーモンに送信
-- **デーモン** が `claude-agent-sdk` を呼び出し、ストリーミングでレスポンスを返却
-- セッション ID を保存することで、次回以降の会話を `resume` オプションで再開
+| ファイル                      | 内容                                                         |
+| ----------------------------- | ------------------------------------------------------------ |
+| `sessions/sessions.json`      | Claude側で管理されているセッション情報と紐づくセッションID |
