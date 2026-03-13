@@ -15,19 +15,18 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Any, cast
 
 try:
-    from .config import DEFAULT_SESSION_ID, PID_FILE, SESSIONS_JSON, SOCKET_PATH
+    from .config import DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
     from .daemon import get_daemon_status, start_daemon_process, stop_daemon_process
-    from .session_store import SessionMeta, SessionStore
 except ImportError:
-    _pkg_root = str(__import__("pathlib").Path(__file__).parent.parent)
+    _pkg_root = str(Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
-    from src.config import DEFAULT_SESSION_ID, PID_FILE, SESSIONS_JSON, SOCKET_PATH
+    from src.config import DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
     from src.daemon import get_daemon_status, start_daemon_process, stop_daemon_process
-    from src.session_store import SessionMeta, SessionStore
 
 _CRAB = "🦀"
 
@@ -169,67 +168,35 @@ class OpenClaudeCLI:
     # ------------------------------------------------------------------
 
     async def cmd_sessions(self) -> None:
-        """デーモンからセッション一覧を取得してテーブル形式で表示する。"""
+        """デーモンからセッション一覧を取得して表示する。"""
         sessions = await self._fetch_sessions()
 
         print(f"{_CRAB} OpenClaude\n")
-        print(f"Session store: {SESSIONS_JSON}")
 
         if not sessions:
-            print("Sessions listed: 0")
+            print("Sessions: 0")
             return
 
-        print(f"Sessions listed: {len(sessions)}\n")
+        print(f"Sessions: {len(sessions)}\n")
 
-        # テーブルヘッダー
-        col_id = max(len(s["session_id"]) for s in sessions)
+        col_id = max((len(s["session_id"]) for s in sessions), default=10)
         col_id = max(col_id, 10)
-        col_age = 9
-        col_model = max((len(_short_model(s.get("model") or "")) for s in sessions), default=0)
-        col_model = max(col_model, 20)
-
-        header = (
-            f"{'session-id':<{col_id}}  {'Age':<{col_age}}  {'Model':<{col_model}}  Tokens (ctx %)"
-        )
-        print(header)
-
+        col_sdk = max((len(s.get("sdk_session_id") or "-") for s in sessions), default=14)
+        col_sdk = max(col_sdk, 14)
+        col_la = max((len(s.get("last_active") or "-") for s in sessions), default=11)
+        col_la = max(col_la, 11)
+        print(f"{'session-id':<{col_id}}  {'sdk_session_id':<{col_sdk}}  {'last_active':<{col_la}}  total_tokens")
         for s in sessions:
-            age = SessionStore.format_age(s.get("last_active_at", ""))
-            model_short = _short_model(s.get("model") or "")
-            meta_obj = _dict_to_meta(s)
-            tokens = SessionStore.format_tokens(meta_obj)
-            row = (
-                f"{s['session_id']:<{col_id}}  "
-                f"{age:<{col_age}}  "
-                f"{model_short:<{col_model}}  "
-                f"{tokens}"
-            )
-            print(row)
+            alias = s["session_id"]
+            sdk_id = s.get("sdk_session_id") or "-"
+            last_active = s.get("last_active") or "-"
+            total_tokens = s.get("total_tokens", 0)
+            print(f"{alias:<{col_id}}  {sdk_id:<{col_sdk}}  {last_active:<{col_la}}  {total_tokens}")
 
     async def _fetch_sessions(self) -> list[dict[str, Any]]:
-        """デーモンに接続してセッション一覧を取得する。
-
-        デーモン未起動時は sessions.json を直接読み込む。
-        """
+        """デーモンに接続してセッション一覧を取得する。デーモン未起動時は空リストを返す。"""
         if not self._is_daemon_up():
-            # デーモンが起動していない場合は sessions.json を直接読み込む
-            store = SessionStore()
-            await store.load()
-            sessions_meta = await store.list_sessions()
-            return [
-                {
-                    "session_id": s.session_id,
-                    "sdk_session_id": s.sdk_session_id,
-                    "model": s.model,
-                    "created_at": s.created_at,
-                    "last_active_at": s.last_active_at,
-                    "total_input_tokens": s.total_input_tokens,
-                    "total_output_tokens": s.total_output_tokens,
-                    "context_window": s.context_window,
-                    "num_turns": s.num_turns,
-                }
-                for s in sessions_meta
-            ]
+            return []
 
         try:
             reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
@@ -324,33 +291,3 @@ class OpenClaudeCLI:
         if not line:
             return {}
         return cast(dict[str, Any], json.loads(line.decode("utf-8").strip()))
-
-
-# ---------------------------------------------------------------------------
-# ユーティリティ関数
-# ---------------------------------------------------------------------------
-
-
-def _short_model(model: str) -> str:
-    """モデル名を短縮する。例: 'us.anthropic.claude-sonnet-4-6' → 'claude-sonnet-4-6'。"""
-    if not model:
-        return ""
-    if "claude-" in model:
-        idx = model.index("claude-")
-        return model[idx:]
-    return model
-
-
-def _dict_to_meta(d: dict[str, Any]) -> SessionMeta:
-    """sessions_list の辞書エントリを SessionMeta オブジェクトに変換する。"""
-    return SessionMeta(
-        session_id=d.get("session_id", ""),
-        sdk_session_id=d.get("sdk_session_id"),
-        model=d.get("model"),
-        created_at=d.get("created_at", ""),
-        last_active_at=d.get("last_active_at", ""),
-        total_input_tokens=d.get("total_input_tokens", 0),
-        total_output_tokens=d.get("total_output_tokens", 0),
-        context_window=d.get("context_window", 200000),
-        num_turns=d.get("num_turns", 0),
-    )

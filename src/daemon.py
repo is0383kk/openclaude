@@ -13,7 +13,7 @@ import os
 import signal
 import subprocess
 import sys
-from datetime import datetime, timezone
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,26 +21,26 @@ from typing import Any, Optional
 try:
     from .config import (
         BASE_DIR,
-        CONTEXT_WINDOW,
+        CLAUDE_PROJECTS_DIR,
         DAEMON_LOG,
         PID_FILE,
         SESSIONS_DIR,
+        SESSIONS_JSON,
         SOCKET_PATH,
     )
-    from .session_store import SessionMeta, SessionStore
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
     from src.config import (
         BASE_DIR,
-        CONTEXT_WINDOW,
+        CLAUDE_PROJECTS_DIR,
         DAEMON_LOG,
         PID_FILE,
         SESSIONS_DIR,
+        SESSIONS_JSON,
         SOCKET_PATH,
     )
-    from src.session_store import SessionMeta, SessionStore
 
 
 # ---------------------------------------------------------------------------
@@ -52,18 +52,14 @@ class OpenClaudeDaemon:
     """Unix ソケットサーバーとして動作する常駐デーモン。"""
 
     def __init__(self) -> None:
-        """セッションストアとサーバー状態を初期化する。"""
-        self.session_store = SessionStore()
+        """セッション辞書とサーバー状態を初期化する。"""
+        self._sessions: dict[str, str] = self._load_sessions()  # alias → sdk_session_id
         self._server: Optional[asyncio.AbstractServer] = None
         self._shutdown_event = asyncio.Event()
 
     async def start(self) -> None:
         """Unix ソケットサーバーを起動し、シャットダウンまで待機する。"""
-        # ディレクトリが存在することを確認
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-
-        # 既存のセッションメタデータを読み込む
-        await self.session_store.load()
 
         # 前回実行時の古いソケットファイルを削除
         SOCKET_PATH.unlink(missing_ok=True)
@@ -94,9 +90,7 @@ class OpenClaudeDaemon:
     # クライアントハンドラー
     # ------------------------------------------------------------------
 
-    async def handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """クライアント接続を受け付け、リクエストの種別に応じてハンドラーに振り分ける。"""
         try:
             line = await reader.readline()
@@ -112,9 +106,7 @@ class OpenClaudeDaemon:
             elif req_type == "stop":
                 await self.handle_stop(writer)
             else:
-                await self._send_json(
-                    writer, {"type": "error", "message": f"Unknown type: {req_type}"}
-                )
+                await self._send_json(writer, {"type": "error", "message": f"Unknown type: {req_type}"})
         except json.JSONDecodeError as e:
             try:
                 await self._send_json(writer, {"type": "error", "message": f"Invalid JSON: {e}"})
@@ -161,8 +153,7 @@ class OpenClaudeDaemon:
             await self._send_json(writer, {"type": "error", "message": "Empty message"})
             return
 
-        meta = await self.session_store.get_session(session_alias)
-        sdk_session_id = meta.sdk_session_id if meta else None
+        sdk_session_id = self._sessions.get(session_alias)
 
         options = ClaudeAgentOptions(
             setting_sources=["project"],
@@ -172,10 +163,6 @@ class OpenClaudeDaemon:
             resume=sdk_session_id,
         )
 
-        # SDK に送信する前にユーザーメッセージをログに記録
-        await self.session_store.append_message(session_alias, role="user", content=user_message)
-
-        current_sdk_session_id: Optional[str] = sdk_session_id
         current_model: Optional[str] = None
         full_text: str = ""
         has_stream_events: bool = False
@@ -183,9 +170,7 @@ class OpenClaudeDaemon:
         try:
             async for message in query(prompt=user_message, options=options):
                 if hasattr(message, "subtype") and message.subtype == "init":
-                    meta, current_sdk_session_id = await self._handle_init_event(
-                        message, session_alias, meta, current_sdk_session_id
-                    )
+                    self._handle_init_event(message, session_alias)
                 elif isinstance(message, StreamEvent):
                     full_text, has_stream_events = await self._handle_stream_event(
                         message, writer, full_text, has_stream_events
@@ -195,43 +180,16 @@ class OpenClaudeDaemon:
                         message, writer, has_stream_events, full_text
                     )
                 elif isinstance(message, ResultMessage):
-                    await self._handle_result_message(
-                        message,
-                        writer,
-                        session_alias,
-                        meta,
-                        current_sdk_session_id,
-                        current_model,
-                        full_text,
-                    )
+                    await self._handle_result_message(message, writer, current_model)
         except Exception as e:
             await self._send_json(writer, {"type": "error", "message": str(e)})
 
-    async def _handle_init_event(
-        self,
-        message: Any,
-        session_alias: str,
-        meta: Optional[SessionMeta],
-        current_sdk_session_id: Optional[str],
-    ) -> tuple[Optional[SessionMeta], Optional[str]]:
-        """セッション初期化メッセージを処理してメタデータを更新する。"""
+    def _handle_init_event(self, message: Any, session_alias: str) -> None:
+        """セッション初期化メッセージから sdk_session_id を取得してメモリとファイルに保存する。"""
         new_id = (message.data or {}).get("session_id")
         if new_id:
-            current_sdk_session_id = new_id
-        now = datetime.now(timezone.utc).isoformat()
-        init_meta = SessionMeta(
-            session_id=session_alias,
-            sdk_session_id=current_sdk_session_id,
-            model=None,
-            created_at=meta.created_at if meta else now,
-            last_active_at=now,
-            total_input_tokens=meta.total_input_tokens if meta else 0,
-            total_output_tokens=meta.total_output_tokens if meta else 0,
-            context_window=CONTEXT_WINDOW,
-            num_turns=meta.num_turns if meta else 0,
-        )
-        await self.session_store.upsert_session(init_meta)
-        return init_meta, current_sdk_session_id
+            self._sessions[session_alias] = new_id
+            self._save_sessions()
 
     async def _handle_stream_event(
         self,
@@ -278,85 +236,37 @@ class OpenClaudeDaemon:
         self,
         message: Any,
         writer: asyncio.StreamWriter,
-        session_alias: str,
-        meta: Optional[SessionMeta],
-        current_sdk_session_id: Optional[str],
         current_model: Optional[str],
-        full_text: str,
     ) -> None:
-        """ResultMessage を処理してセッションを更新し、完了シグナルを送信する。"""
-        if not current_sdk_session_id and hasattr(message, "session_id"):
-            current_sdk_session_id = message.session_id
-
+        """ResultMessage から完了シグナルを送信する。"""
         usage = getattr(message, "usage", None) or {}
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        total_cost = getattr(message, "total_cost_usd", None)
-        stop_reason = getattr(message, "stop_reason", "end_turn")
-        num_turns = getattr(message, "num_turns", 0)
-
-        now = datetime.now(timezone.utc).isoformat()
-        updated_meta = SessionMeta(
-            session_id=session_alias,
-            sdk_session_id=current_sdk_session_id,
-            model=current_model,
-            created_at=meta.created_at if meta else now,
-            last_active_at=now,
-            total_input_tokens=(meta.total_input_tokens if meta else 0) + input_tokens,
-            total_output_tokens=(meta.total_output_tokens if meta else 0) + output_tokens,
-            context_window=CONTEXT_WINDOW,
-            num_turns=(meta.num_turns if meta else 0) + num_turns,
-        )
-        await self.session_store.upsert_session(updated_meta)
-
-        # アシスタントメッセージをログに記録
-        await self.session_store.append_message(
-            session_alias,
-            role="assistant",
-            content=full_text,
-            model=current_model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            stop_reason=stop_reason,
-        )
-
-        # 完了シグナルを送信
         await self._send_json(
             writer,
             {
                 "type": "done",
-                "stop_reason": stop_reason,
+                "stop_reason": getattr(message, "stop_reason", "end_turn"),
                 "model": current_model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_cost_usd": total_cost,
-                "num_turns": num_turns,
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "total_cost_usd": getattr(message, "total_cost_usd", None),
+                "num_turns": getattr(message, "num_turns", 0),
             },
         )
 
     async def handle_sessions(self, writer: asyncio.StreamWriter) -> None:
-        """セッション一覧を JSON で返す。"""
-        sessions = await self.session_store.list_sessions()
-        await self._send_json(
-            writer,
-            {
-                "type": "sessions_list",
-                "sessions": [
-                    {
-                        "session_id": s.session_id,
-                        "sdk_session_id": s.sdk_session_id,
-                        "model": s.model,
-                        "created_at": s.created_at,
-                        "last_active_at": s.last_active_at,
-                        "total_input_tokens": s.total_input_tokens,
-                        "total_output_tokens": s.total_output_tokens,
-                        "context_window": s.context_window,
-                        "num_turns": s.num_turns,
-                    }
-                    for s in sessions
-                ],
-            },
-        )
+        """メモリ上のセッション一覧を JSON で返す。"""
+        sessions = []
+        for alias, sid in self._sessions.items():
+            stats = self._read_session_stats(sid) if sid else {"last_active": None, "total_tokens": 0}
+            sessions.append(
+                {
+                    "session_id": alias,
+                    "sdk_session_id": sid,
+                    "last_active": stats["last_active"],
+                    "total_tokens": stats["total_tokens"],
+                }
+            )
+        await self._send_json(writer, {"type": "sessions_list", "sessions": sessions})
 
     async def handle_stop(self, writer: asyncio.StreamWriter) -> None:
         """停止レスポンスを返した後、デーモンをシャットダウンする。"""
@@ -367,6 +277,55 @@ class OpenClaudeDaemon:
     # ------------------------------------------------------------------
     # ヘルパー
     # ------------------------------------------------------------------
+
+    def _read_session_stats(self, sdk_session_id: str) -> dict[str, Any]:
+        """sdk_session_id に対応する JSONL から last_active と total_tokens を返す。"""
+        jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
+        last_active: Optional[str] = None
+        total_tokens = 0
+
+        if not jsonl_path.exists():
+            return {"last_active": None, "total_tokens": 0}
+
+        for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError as e:
+                print(f"[warn] Skipping malformed JSONL line in {jsonl_path.name}: {e}", file=sys.stderr, flush=True)
+                continue
+            if "timestamp" in entry:
+                last_active = entry["timestamp"]
+            msg = entry.get("message")
+            if isinstance(msg, dict) and msg.get("stop_reason"):
+                usage = msg.get("usage") or {}
+                total_tokens += usage.get("input_tokens", 0)
+                total_tokens += usage.get("cache_creation_input_tokens", 0)
+                total_tokens += usage.get("cache_read_input_tokens", 0)
+                total_tokens += usage.get("output_tokens", 0)
+
+        return {"last_active": last_active, "total_tokens": total_tokens}
+
+    def _load_sessions(self) -> dict[str, str]:
+        """sessions.json から alias → sdk_session_id を読み込む。"""
+        try:
+            if SESSIONS_JSON.exists():
+                data = json.loads(SESSIONS_JSON.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {str(k): str(v) for k, v in data.items()}
+        except Exception as e:
+            print(f"[warn] Failed to load sessions: {e}", file=sys.stderr, flush=True)
+        return {}
+
+    def _save_sessions(self) -> None:
+        """self._sessions を sessions.json にアトミックに書き込む。"""
+        try:
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(SESSIONS_DIR), suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(self._sessions, f, ensure_ascii=False)
+            os.replace(tmp, str(SESSIONS_JSON))
+        except Exception as e:
+            print(f"[warn] Failed to save sessions: {e}", file=sys.stderr, flush=True)
 
     async def _send_json(self, writer: asyncio.StreamWriter, data: dict[str, Any]) -> None:
         line = json.dumps(data, ensure_ascii=False) + "\n"
