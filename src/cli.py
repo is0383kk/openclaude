@@ -1,7 +1,6 @@
-"""
-OpenClaude CLI - argument parsing and command execution.
+"""OpenClaude CLI - コマンド引数の解析と実行。
 
-Commands:
+コマンド一覧:
     openclaude start
     openclaude stop
     openclaude restart
@@ -10,19 +9,19 @@ Commands:
     openclaude [--session-id ID] --message TEXT
     openclaude [--session-id ID] -m TEXT
 """
+
 import argparse
 import asyncio
 import json
 import sys
 import time
-from typing import Optional
+from typing import Any, cast
 
 try:
     from .config import DEFAULT_SESSION_ID, PID_FILE, SESSIONS_JSON, SOCKET_PATH
     from .daemon import get_daemon_status, start_daemon_process, stop_daemon_process
     from .session_store import SessionMeta, SessionStore
 except ImportError:
-    import os
     _pkg_root = str(__import__("pathlib").Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
@@ -34,21 +33,22 @@ _CRAB = "🦀"
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# エントリーポイント
 # ---------------------------------------------------------------------------
-
 def main() -> None:
+    """CLI のエントリーポイント。"""
     cli = OpenClaudeCLI()
     cli.run()
 
 
 # ---------------------------------------------------------------------------
-# CLI class
+# CLI クラス
 # ---------------------------------------------------------------------------
-
 class OpenClaudeCLI:
+    """コマンドライン引数を解析してデーモン操作とメッセージ送信を行うクラス。"""
 
     def run(self) -> None:
+        """引数を解析して対応するコマンドを実行する。"""
         parser = self._build_parser()
         args = parser.parse_args()
 
@@ -80,7 +80,7 @@ class OpenClaudeCLI:
         subparsers.add_parser("status", help="Show daemon status")
         subparsers.add_parser("sessions", help="List conversation sessions")
 
-        # Conversation mode
+        # 会話モード
         parser.add_argument(
             "--session-id",
             default=DEFAULT_SESSION_ID,
@@ -97,10 +97,10 @@ class OpenClaudeCLI:
         return parser
 
     # ------------------------------------------------------------------
-    # Daemon management commands
+    # デーモン管理コマンド
     # ------------------------------------------------------------------
-
     def cmd_start(self) -> None:
+        """デーモンを起動する。既に起動済みの場合はメッセージを表示して終了する。"""
         status, pid = get_daemon_status()
         if status == "running":
             print(f"OpenClaude is already running (PID: {pid})")
@@ -113,7 +113,7 @@ class OpenClaudeCLI:
         print("Starting OpenClaude daemon...")
         start_daemon_process()
 
-        # Wait for socket to appear (max 15 seconds)
+        # ソケットファイルが現れるまで最大15秒待機
         for _ in range(150):
             time.sleep(0.1)
             if SOCKET_PATH.exists():
@@ -122,11 +122,15 @@ class OpenClaudeCLI:
                     print(f"OpenClaude started (PID: {pid})")
                     return
 
-        print("ERROR: Daemon did not start in time. Check daemon.log for details.", file=sys.stderr)
+        print(
+            "ERROR: Daemon did not start in time. Check daemon.log for details.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     def cmd_stop(self) -> None:
-        status, pid = get_daemon_status()
+        """デーモンを停止する。起動していない場合はメッセージを表示して終了する。"""
+        status, _ = get_daemon_status()
         if status == "stopped":
             print("OpenClaude is not running.")
             return
@@ -134,7 +138,7 @@ class OpenClaudeCLI:
         print("Stopping OpenClaude daemon...")
         ok = stop_daemon_process()
         if ok:
-            # Wait for socket to disappear (max 5 seconds)
+            # ソケットファイルが消えるまで最大5秒待機
             for _ in range(50):
                 time.sleep(0.1)
                 if not SOCKET_PATH.exists():
@@ -145,11 +149,13 @@ class OpenClaudeCLI:
             sys.exit(1)
 
     def cmd_restart(self) -> None:
+        """デーモンを再起動する。"""
         self.cmd_stop()
         time.sleep(0.5)
         self.cmd_start()
 
     def cmd_status(self) -> None:
+        """デーモンの稼働状態を表示する。"""
         status, pid = get_daemon_status()
         if status == "running":
             print(f"OpenClaude is running (PID: {pid})")
@@ -159,11 +165,11 @@ class OpenClaudeCLI:
             print("OpenClaude is stopped.")
 
     # ------------------------------------------------------------------
-    # Session commands
+    # セッションコマンド
     # ------------------------------------------------------------------
 
     async def cmd_sessions(self) -> None:
-        """Fetch session list from daemon and display as table."""
+        """デーモンからセッション一覧を取得してテーブル形式で表示する。"""
         sessions = await self._fetch_sessions()
 
         print(f"{_CRAB} OpenClaude\n")
@@ -175,7 +181,7 @@ class OpenClaudeCLI:
 
         print(f"Sessions listed: {len(sessions)}\n")
 
-        # Table header
+        # テーブルヘッダー
         col_id = max(len(s["session_id"]) for s in sessions)
         col_id = max(col_id, 10)
         col_age = 9
@@ -183,10 +189,7 @@ class OpenClaudeCLI:
         col_model = max(col_model, 20)
 
         header = (
-            f"{'session-id':<{col_id}}  "
-            f"{'Age':<{col_age}}  "
-            f"{'Model':<{col_model}}  "
-            f"Tokens (ctx %)"
+            f"{'session-id':<{col_id}}  {'Age':<{col_age}}  {'Model':<{col_model}}  Tokens (ctx %)"
         )
         print(header)
 
@@ -203,10 +206,13 @@ class OpenClaudeCLI:
             )
             print(row)
 
-    async def _fetch_sessions(self) -> list[dict]:
-        """Connect to daemon and retrieve session list."""
+    async def _fetch_sessions(self) -> list[dict[str, Any]]:
+        """デーモンに接続してセッション一覧を取得する。
+
+        デーモン未起動時は sessions.json を直接読み込む。
+        """
         if not self._is_daemon_up():
-            # If daemon not running, read directly from sessions.json
+            # デーモンが起動していない場合は sessions.json を直接読み込む
             store = SessionStore()
             await store.load()
             sessions_meta = await store.list_sessions()
@@ -235,22 +241,22 @@ class OpenClaudeCLI:
             await writer.wait_closed()
 
             if response.get("type") == "sessions_list":
-                return response.get("sessions", [])
+                return cast(list[dict[str, Any]], response.get("sessions", []))
             return []
         except Exception:
             return []
 
     # ------------------------------------------------------------------
-    # Message command
+    # メッセージコマンド
     # ------------------------------------------------------------------
 
     async def cmd_message(self, session_id: str, message: str) -> None:
-        """Send a message to the agent and stream the response."""
-        # Auto-start daemon if not running
+        """エージェントにメッセージを送信してレスポンスをストリーミング表示する。"""
+        # デーモンが起動していなければ自動起動
         if not self._is_daemon_up():
             print("Starting OpenClaude daemon...")
             start_daemon_process()
-            # Wait for socket
+            # ソケットが現れるまで待機
             for _ in range(150):
                 await asyncio.sleep(0.1)
                 if SOCKET_PATH.exists():
@@ -269,17 +275,17 @@ class OpenClaudeCLI:
             sys.exit(1)
 
         try:
-            # Print header
+            # ヘッダー表示
             print(f"{_CRAB} OpenClaude\uff08{session_id}\uff09")
             print("\u2502")
             print("\u25c7")
 
-            # Send request
+            # リクエスト送信
             request = {"type": "query", "session_id": session_id, "message": message}
             writer.write((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
             await writer.drain()
 
-            # Stream response
+            # レスポンスをストリーミング受信
             while True:
                 response = await self._read_json(reader)
                 resp_type = response.get("type")
@@ -289,7 +295,7 @@ class OpenClaudeCLI:
                     print(text, end="", flush=True)
 
                 elif resp_type == "done":
-                    print()  # Final newline
+                    print()  # 最終改行
                     break
 
                 elif resp_type == "error":
@@ -298,7 +304,7 @@ class OpenClaudeCLI:
                     sys.exit(1)
 
                 else:
-                    # Unknown type - ignore
+                    # 未知のレスポンス種別は無視
                     pass
 
         finally:
@@ -306,26 +312,27 @@ class OpenClaudeCLI:
             await writer.wait_closed()
 
     # ------------------------------------------------------------------
-    # Helpers
+    # ヘルパー
     # ------------------------------------------------------------------
 
     def _is_daemon_up(self) -> bool:
         status, _ = get_daemon_status()
         return status == "running"
 
-    async def _read_json(self, reader: asyncio.StreamReader) -> dict:
+    async def _read_json(self, reader: asyncio.StreamReader) -> dict[str, Any]:
         line = await reader.readline()
         if not line:
             return {}
-        return json.loads(line.decode("utf-8").strip())
+        return cast(dict[str, Any], json.loads(line.decode("utf-8").strip()))
 
 
 # ---------------------------------------------------------------------------
-# Utility functions
+# ユーティリティ関数
 # ---------------------------------------------------------------------------
+
 
 def _short_model(model: str) -> str:
-    """Shorten model names like 'us.anthropic.claude-sonnet-4-6' → 'claude-sonnet-4-6'."""
+    """モデル名を短縮する。例: 'us.anthropic.claude-sonnet-4-6' → 'claude-sonnet-4-6'。"""
     if not model:
         return ""
     if "claude-" in model:
@@ -334,8 +341,8 @@ def _short_model(model: str) -> str:
     return model
 
 
-def _dict_to_meta(d: dict):
-    """Convert sessions_list dict entry to a SessionMeta-like object for formatting."""
+def _dict_to_meta(d: dict[str, Any]) -> SessionMeta:
+    """sessions_list の辞書エントリを SessionMeta オブジェクトに変換する。"""
     return SessionMeta(
         session_id=d.get("session_id", ""),
         sdk_session_id=d.get("sdk_session_id"),

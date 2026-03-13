@@ -1,0 +1,54 @@
+[tool.ruff]
+extend-exclude = ["__pycache__"] # ディレクトリの除外設定
+target-version = "py311"         # Pythonの最小バージョンを指定する
+line-length = 99                 # 行の最大長を99文字にする
+indent-width = 4                 # デフォルト値(PEP8準拠)だが明示する
+
+[tool.ruff.format]
+docstring-code-format = true      # docstringのコードブロックをフォーマットする
+docstring-code-line-length = 110  # docstringの最大長を90文字にする
+indent-style = "space"            # デフォルト値(PEP8準拠)だが明示する
+line-ending = "lf"                # 行末はLFにする
+quote-style = "double"            # デフォルト値(PEP8準拠)だが明示する
+skip-magic-trailing-comma = false # デフォルト値(PEP8準拠)だが明示する
+
+[tool.ruff.lint]
+select = ["N", "E", "W", "D", "F", "I", "C90", "S", "TID", "ARG"] # ルールセット設定
+ignore = [
+  "D400",   # docstringの末尾にピリオドを要求しない
+  "D415",   # docstringの末尾にピリオドを要求しない
+  "TID252", # 相対インポートを許容する
+]
+fixable = ["ALL"] # 修正可能なコードは全て修正する
+unfixable = [] # 修正を無視するエラーコードリスト
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$" # _,__から始まる変数名を許容する
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = [
+  "D104", # __init__.pyはドキュメントが不要
+]
+
+[tool.ruff.lint.flake8-bandit]
+check-typed-exception = true # try-except-passを禁止する
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 110 # docstringの最大長を90文字にする
+
+[tool.ruff.lint.pydocstyle]
+convention = "google" # docstringはGoogle Python Style Guideに準拠する
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10 # 循環的複雑度の上限を10にする
+
+[tool.ruff.lint.isort]
+case-sensitive = true # インポート順は大文字小文字を区別する
+
+[tool.mypy]
+show_error_context = true
+show_column_numbers = true
+ignore_missing_imports = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+check_untyped_defs = true
+explicit_package_bases = true
