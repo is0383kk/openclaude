@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, cast
 
 try:
-    from .config import DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
+    from .config import CLAUDE_PROJECTS_DIR, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
     from .daemon import get_daemon_status, start_daemon_process, stop_daemon_process
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
@@ -177,7 +177,8 @@ class OpenClaudeCLI:
             print("Sessions: 0")
             return
 
-        print(f"Sessions: {len(sessions)}\n")
+        print(f"Sessions: {len(sessions)}")
+        print(f"Sessions Path: {CLAUDE_PROJECTS_DIR}\n")
 
         col_id = max((len(s["session_id"]) for s in sessions), default=10)
         col_id = max(col_id, 10)
