@@ -1,5 +1,5 @@
 > [!WARNING]
-> このリポジトリは開発途中です。ソースコードや各種ドキュメントは不完全です。
+> このリポジトリは開発途中です。ソースコードや各種ドキュメントは不完全です。  
 > This repository is under development. The source code and documentation are incomplete.
 
 # OpenClaude
