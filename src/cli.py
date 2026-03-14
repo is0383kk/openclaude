@@ -11,6 +11,9 @@
     openclaude sessions delete SESSION_ID
     openclaude [--session-id ID] --message TEXT
     openclaude [--session-id ID] -m TEXT
+    echo "質問" | openclaude
+    openclaude < file.txt
+    cat file.txt | openclaude -m "これを要約して"
 """
 
 import argparse
@@ -79,10 +82,12 @@ class OpenClaudeCLI:
                 asyncio.run(self.cmd_sessions_delete(args.session_id))
             else:
                 asyncio.run(self.cmd_sessions())
-        elif args.message is not None:
-            asyncio.run(self.cmd_message(args.session_id, args.message))
         else:
-            parser.print_help()
+            message = self._resolve_message(args.message)
+            if message is not None:
+                asyncio.run(self.cmd_message(args.session_id, message))
+            else:
+                parser.print_help()
 
     def _build_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
@@ -386,6 +391,23 @@ class OpenClaudeCLI:
     # ------------------------------------------------------------------
     # ヘルパー
     # ------------------------------------------------------------------
+
+    def _resolve_message(self, message_arg: str | None) -> str | None:
+        """コマンドライン引数と stdin からメッセージを解決する。
+
+        stdin がパイプ/リダイレクトの場合は stdin の内容を読み込む。
+        - message_arg が None の場合: stdin の内容をそのままメッセージにする。
+        - message_arg がある場合: stdin の内容を前置きし、message_arg を後ろに結合する。
+          例: `cat report.txt | openclaude -m "これを要約して"`
+        """
+        if sys.stdin.isatty():
+            return message_arg
+
+        stdin_text = sys.stdin.read().strip()
+        if not stdin_text:
+            return message_arg
+
+        return stdin_text if message_arg is None else stdin_text + "\n\n" + message_arg
 
     def _is_daemon_up(self) -> bool:
         status, _ = get_daemon_status()
