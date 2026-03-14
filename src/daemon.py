@@ -105,6 +105,8 @@ class OpenClaudeDaemon:
                 await self.handle_sessions(writer)
             elif req_type == "cleanup_sessions":
                 await self.handle_cleanup_sessions(writer)
+            elif req_type == "delete_session":
+                await self.handle_delete_session(request, writer)
             elif req_type == "stop":
                 await self.handle_stop(writer)
             else:
@@ -300,6 +302,43 @@ class OpenClaudeDaemon:
                 "type": "cleanup_done",
                 "deleted_count": len(deleted_files),
                 "failed": failed_files,
+            },
+        )
+
+    async def handle_delete_session(self, request: dict[str, Any], writer: asyncio.StreamWriter) -> None:
+        """指定した alias のセッションのメモリ・sessions.json・JSONL ファイルを削除する。"""
+        session_alias = request.get("session_id", "")
+
+        if not session_alias:
+            await self._send_json(writer, {"type": "error", "message": "session_id is required"})
+            return
+
+        sdk_session_id = self._sessions.get(session_alias)
+        if sdk_session_id is None:
+            await self._send_json(writer, {"type": "error", "message": f"Session not found: {session_alias}"})
+            return
+
+        deleted_file: Optional[str] = None
+        failed: Optional[str] = None
+
+        jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
+        if jsonl_path.exists():
+            try:
+                jsonl_path.unlink()
+                deleted_file = jsonl_path.name
+            except Exception as e:
+                failed = f"{jsonl_path.name}: {e}"
+
+        del self._sessions[session_alias]
+        self._save_sessions()
+
+        await self._send_json(
+            writer,
+            {
+                "type": "delete_done",
+                "session_id": session_alias,
+                "deleted_file": deleted_file,
+                "failed": failed,
             },
         )
 
