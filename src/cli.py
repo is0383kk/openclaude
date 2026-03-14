@@ -7,6 +7,7 @@
     openclaude status
     openclaude sessions
     openclaude sessions cleanup
+    openclaude sessions delete SESSION_ID
     openclaude [--session-id ID] --message TEXT
     openclaude [--session-id ID] -m TEXT
 """
@@ -63,6 +64,8 @@ class OpenClaudeCLI:
         elif args.command == "sessions":
             if getattr(args, "sessions_command", None) == "cleanup":
                 asyncio.run(self.cmd_sessions_cleanup())
+            elif getattr(args, "sessions_command", None) == "delete":
+                asyncio.run(self.cmd_sessions_delete(args.session_id))
             else:
                 asyncio.run(self.cmd_sessions())
         elif args.message is not None:
@@ -84,6 +87,8 @@ class OpenClaudeCLI:
         sessions_parser = subparsers.add_parser("sessions", help="Manage conversation sessions")
         sessions_sub = sessions_parser.add_subparsers(dest="sessions_command")
         sessions_sub.add_parser("cleanup", help="Clean up all sessions")
+        delete_parser = sessions_sub.add_parser("delete", help="Delete a specific session")
+        delete_parser.add_argument("session_id", metavar="SESSION_ID", help="Session alias to delete")
 
         # 会話モード
         parser.add_argument(
@@ -220,6 +225,34 @@ class OpenClaudeCLI:
                 print(f"Cleaned up {count} session(s).")
                 for f in response.get("failed", []):
                     print(f"  [warn] {f}", file=sys.stderr)
+            elif response.get("type") == "error":
+                print(f"ERROR: {response.get('message')}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    async def cmd_sessions_delete(self, session_id: str) -> None:
+        """指定したセッションを削除する。"""
+        if not self._is_daemon_up():
+            print("OpenClaude daemon is not running.")
+            return
+
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+            writer.write(
+                (json.dumps({"type": "delete_session", "session_id": session_id}) + "\n").encode("utf-8")
+            )
+            await writer.drain()
+
+            response = await self._read_json(reader)
+            writer.close()
+            await writer.wait_closed()
+
+            if response.get("type") == "delete_done":
+                print(f"Deleted session: {session_id}")
+                if response.get("failed"):
+                    print(f"  [warn] {response['failed']}", file=sys.stderr)
             elif response.get("type") == "error":
                 print(f"ERROR: {response.get('message')}", file=sys.stderr)
                 sys.exit(1)
