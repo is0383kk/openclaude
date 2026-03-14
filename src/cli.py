@@ -240,9 +240,7 @@ class OpenClaudeCLI:
 
         try:
             reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
-            writer.write(
-                (json.dumps({"type": "delete_session", "session_id": session_id}) + "\n").encode("utf-8")
-            )
+            writer.write((json.dumps({"type": "delete_session", "session_id": session_id}) + "\n").encode("utf-8"))
             await writer.drain()
 
             response = await self._read_json(reader)
