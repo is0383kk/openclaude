@@ -5,6 +5,7 @@
     openclaude stop
     openclaude restart
     openclaude status
+    openclaude logs [--tail N]
     openclaude sessions
     openclaude sessions cleanup
     openclaude sessions delete SESSION_ID
@@ -21,13 +22,13 @@ from pathlib import Path
 from typing import Any, cast
 
 try:
-    from .config import CLAUDE_PROJECTS_DIR, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
+    from .config import CLAUDE_PROJECTS_DIR, DAEMON_LOG, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
     from .daemon import get_daemon_status, start_daemon_process, stop_daemon_process
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
-    from src.config import DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
+    from src.config import DAEMON_LOG, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
     from src.daemon import get_daemon_status, start_daemon_process, stop_daemon_process
 
 _CRAB = "🦀"
@@ -61,6 +62,8 @@ class OpenClaudeCLI:
             self.cmd_restart()
         elif args.command == "status":
             self.cmd_status()
+        elif args.command == "logs":
+            self.cmd_logs(getattr(args, "tail", None))
         elif args.command == "sessions":
             if getattr(args, "sessions_command", None) == "cleanup":
                 asyncio.run(self.cmd_sessions_cleanup())
@@ -84,6 +87,14 @@ class OpenClaudeCLI:
         subparsers.add_parser("stop", help="Stop the OpenClaude daemon")
         subparsers.add_parser("restart", help="Restart the OpenClaude daemon")
         subparsers.add_parser("status", help="Show daemon status")
+        logs_parser = subparsers.add_parser("logs", help="Show daemon log")
+        logs_parser.add_argument(
+            "--tail",
+            type=int,
+            default=None,
+            metavar="N",
+            help="Show last N lines (default: show all)",
+        )
         sessions_parser = subparsers.add_parser("sessions", help="Manage conversation sessions")
         sessions_sub = sessions_parser.add_subparsers(dest="sessions_command")
         sessions_sub.add_parser("cleanup", help="Clean up all sessions")
@@ -173,6 +184,17 @@ class OpenClaudeCLI:
             print(f"OpenClaude has a stale PID file (PID: {pid}, process not found).")
         else:
             print("OpenClaude is stopped.")
+
+    def cmd_logs(self, tail: int | None = None) -> None:
+        """デーモンログを表示する。"""
+        if not DAEMON_LOG.exists():
+            print("No log file found.", file=sys.stderr)
+            return
+
+        lines = DAEMON_LOG.read_text(encoding="utf-8").splitlines()
+        if tail is not None:
+            lines = lines[-tail:]
+        print("\n".join(lines))
 
     # ------------------------------------------------------------------
     # セッションコマンド
