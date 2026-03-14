@@ -16,6 +16,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -28,7 +29,14 @@ except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
-    from src.config import DAEMON_LOG, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH, WEBHOOK_DEFAULT_PORT
+    from src.config import (
+        CLAUDE_PROJECTS_DIR,
+        DAEMON_LOG,
+        DEFAULT_SESSION_ID,
+        PID_FILE,
+        SOCKET_PATH,
+        WEBHOOK_DEFAULT_PORT,
+    )
     from src.daemon import get_daemon_status, start_daemon_process, stop_daemon_process
 
 _CRAB = "🦀"
@@ -227,12 +235,9 @@ class OpenClaudeCLI:
         print(f"Sessions: {len(sessions)}")
         print(f"Sessions Path: {CLAUDE_PROJECTS_DIR}\n")
 
-        col_id = max((len(s["session_id"]) for s in sessions), default=10)
-        col_id = max(col_id, 10)
-        col_sdk = max((len(s.get("sdk_session_id") or "-") for s in sessions), default=14)
-        col_sdk = max(col_sdk, 14)
-        col_la = max((len(s.get("last_active") or "-") for s in sessions), default=11)
-        col_la = max(col_la, 11)
+        col_id = max(max(len(s["session_id"]) for s in sessions), 10)
+        col_sdk = max(max(len(s.get("sdk_session_id") or "-") for s in sessions), 14)
+        col_la = max(max(len(s.get("last_active") or "-") for s in sessions), 11)
         print(f"{'session-id':<{col_id}}  {'sdk_session_id':<{col_sdk}}  {'last_active':<{col_la}}  total_tokens")
         for s in sessions:
             alias = s["session_id"]
@@ -372,8 +377,7 @@ class OpenClaudeCLI:
                     sys.exit(1)
 
                 else:
-                    # 未知のレスポンス種別は無視
-                    pass
+                    logging.getLogger(__name__).debug("cmd_message: unknown response type: %s", resp_type)
 
         finally:
             writer.close()
