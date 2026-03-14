@@ -19,4 +19,6 @@ DEFAULT_SESSION_ID: str = "main"
 _projects_dir_name = str(BASE_DIR).replace("/", "-").replace(".", "-")
 CLAUDE_PROJECTS_DIR: Path = Path.home() / ".claude" / "projects" / _projects_dir_name
 
-CONTEXT_WINDOW: int = 200_000
+# Webhook サーバー関連のファイルパス／デフォルトポート
+WEBHOOK_PID_FILE: Path = BASE_DIR / "webhook.pid"
+WEBHOOK_DEFAULT_PORT: int = 28789

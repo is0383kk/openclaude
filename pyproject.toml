@@ -1,3 +1,15 @@
+[project]
+name = "openclaude"
+version = "0.1.0"
+description = "OpenClaude:A Claude Code-based OpenClaw-like resident AI agent"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "claude-agent-sdk>=0.1.48",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+]
+
 [tool.ruff]
 extend-exclude = ["__pycache__"] # ディレクトリの除外設定
 target-version = "py311"         # Pythonの最小バージョンを指定する
