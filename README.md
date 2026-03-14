@@ -115,6 +115,20 @@ systemctl --user status openclaude
 
 ---
 
+### ログの確認
+
+デーモンのログ（`~/.openclaude/daemon.log`）を表示します。
+
+```bash
+# 全ログを表示
+openclaude logs
+
+# 末尾 N 行のみ表示
+openclaude logs --tail 50
+```
+
+---
+
 ## 会話セッションの使い方
 
 ### メッセージを送る

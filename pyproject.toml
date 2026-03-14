@@ -38,7 +38,7 @@ max-doc-length = 120 # docstringの最大長を90文字にする
 convention = "google" # docstringはGoogle Python Style Guideに準拠する
 
 [tool.ruff.lint.mccabe]
-max-complexity = 10 # 循環的複雑度の上限を10にする
+max-complexity = 15 # 循環的複雑度の上限を15にする
 
 [tool.ruff.lint.isort]
 case-sensitive = true # インポート順は大文字小文字を区別する

@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -16,6 +17,8 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Optional
+
+_logger = logging.getLogger(__name__)
 
 # モジュール実行 (python3 -m src.daemon) とスクリプト実行の両方をサポート
 try:
@@ -41,6 +44,28 @@ except ImportError:
         SESSIONS_JSON,
         SOCKET_PATH,
     )
+
+
+# ---------------------------------------------------------------------------
+# ロギング設定
+# ---------------------------------------------------------------------------
+
+
+def _setup_logging() -> None:
+    """デーモン用のロギングを設定する。HH:MM:SS level メッセージ の形式で stdout に出力する。"""
+
+    class _LowerLevelFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            original = record.levelname
+            record.levelname = original.lower()
+            result = super().format(record)
+            record.levelname = original
+            return result
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_LowerLevelFormatter(fmt="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+    logging.root.setLevel(logging.INFO)
+    logging.root.handlers = [handler]
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +100,7 @@ class OpenClaudeDaemon:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self._shutdown_event.set)
 
-        print(f"OpenClaude daemon started (PID: {os.getpid()})", flush=True)
+        _logger.info("OpenClaude daemon started (PID: %d)", os.getpid())
 
         # シャットダウンイベントが発火するまで待機
         async with self._server:
@@ -84,7 +109,7 @@ class OpenClaudeDaemon:
         # クリーンアップ
         SOCKET_PATH.unlink(missing_ok=True)
         PID_FILE.unlink(missing_ok=True)
-        print("OpenClaude daemon stopped.", flush=True)
+        _logger.info("OpenClaude daemon stopped.")
 
     # ------------------------------------------------------------------
     # クライアントハンドラー
@@ -112,11 +137,13 @@ class OpenClaudeDaemon:
             else:
                 await self._send_json(writer, {"type": "error", "message": f"Unknown type: {req_type}"})
         except json.JSONDecodeError as e:
+            _logger.error("Invalid JSON from client: %s", e)
             try:
                 await self._send_json(writer, {"type": "error", "message": f"Invalid JSON: {e}"})
             except Exception:  # noqa: S110
                 pass
         except Exception as e:
+            _logger.error("Unhandled error in handle_client: %s", e)
             try:
                 await self._send_json(writer, {"type": "error", "message": str(e)})
             except Exception:  # noqa: S110
@@ -157,6 +184,7 @@ class OpenClaudeDaemon:
             await self._send_json(writer, {"type": "error", "message": "Empty message"})
             return
 
+        _logger.info("query: session=%s, message_len=%d", session_alias, len(user_message))
         sdk_session_id = self._sessions.get(session_alias)
 
         options = ClaudeAgentOptions(
@@ -186,6 +214,7 @@ class OpenClaudeDaemon:
                 elif isinstance(message, ResultMessage):
                     await self._handle_result_message(message, writer, current_model)
         except Exception as e:
+            _logger.error("query error: session=%s, error=%s", session_alias, e)
             await self._send_json(writer, {"type": "error", "message": str(e)})
 
     def _handle_init_event(self, message: Any, session_alias: str) -> None:
@@ -244,6 +273,15 @@ class OpenClaudeDaemon:
     ) -> None:
         """ResultMessage から完了シグナルを送信する。"""
         usage = getattr(message, "usage", None) or {}
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        _logger.info(
+            "query done: stop_reason=%s, model=%s, input_tokens=%d, output_tokens=%d",
+            getattr(message, "stop_reason", "end_turn"),
+            current_model,
+            input_tokens,
+            output_tokens,
+        )
         await self._send_json(
             writer,
             {
@@ -280,6 +318,7 @@ class OpenClaudeDaemon:
 
     async def handle_cleanup_sessions(self, writer: asyncio.StreamWriter) -> None:
         """全セッションのメモリ・sessions.json・JSONL ファイルを削除する。"""
+        _logger.info("cleanup_sessions: start, count=%d", len(self._sessions))
         deleted_files: list[str] = []
         failed_files: list[str] = []
 
@@ -296,6 +335,7 @@ class OpenClaudeDaemon:
         self._sessions = {}
         self._save_sessions()
 
+        _logger.info("cleanup_sessions: done, deleted=%d, failed=%d", len(deleted_files), len(failed_files))
         await self._send_json(
             writer,
             {
@@ -313,8 +353,10 @@ class OpenClaudeDaemon:
             await self._send_json(writer, {"type": "error", "message": "session_id is required"})
             return
 
+        _logger.info("delete_session: session=%s", session_alias)
         sdk_session_id = self._sessions.get(session_alias)
         if sdk_session_id is None:
+            _logger.warning("delete_session: session not found: %s", session_alias)
             await self._send_json(writer, {"type": "error", "message": f"Session not found: {session_alias}"})
             return
 
@@ -332,6 +374,7 @@ class OpenClaudeDaemon:
         del self._sessions[session_alias]
         self._save_sessions()
 
+        _logger.info("delete_session: done, session=%s, deleted_file=%s", session_alias, deleted_file)
         await self._send_json(
             writer,
             {
@@ -359,7 +402,7 @@ class OpenClaudeDaemon:
             try:
                 entry = json.loads(raw)
             except json.JSONDecodeError as e:
-                print(f"[warn] Skipping malformed JSONL line in {jsonl_path.name}: {e}", file=sys.stderr, flush=True)
+                _logger.warning("Skipping malformed JSONL line in %s: %s", jsonl_path.name, e)
                 continue
             if "timestamp" in entry:
                 last_active = entry["timestamp"]
@@ -381,7 +424,7 @@ class OpenClaudeDaemon:
                 if isinstance(data, dict):
                     return {str(k): str(v) for k, v in data.items()}
         except Exception as e:
-            print(f"[warn] Failed to load sessions: {e}", file=sys.stderr, flush=True)
+            _logger.warning("Failed to load sessions: %s", e)
         return {}
 
     def _save_sessions(self) -> None:
@@ -393,7 +436,7 @@ class OpenClaudeDaemon:
                 json.dump(self._sessions, f, ensure_ascii=False)
             os.replace(tmp, str(SESSIONS_JSON))
         except Exception as e:
-            print(f"[warn] Failed to save sessions: {e}", file=sys.stderr, flush=True)
+            _logger.warning("Failed to save sessions: %s", e)
 
     async def _send_json(self, writer: asyncio.StreamWriter, data: dict[str, Any]) -> None:
         line = json.dumps(data, ensure_ascii=False) + "\n"
@@ -497,6 +540,7 @@ def get_daemon_status() -> tuple[str, Optional[int]]:
 async def _main() -> None:
     # setting_sources=["project"] が .claude/settings.json を参照できるよう CWD を設定
     os.chdir(str(BASE_DIR))
+    _setup_logging()
     daemon = OpenClaudeDaemon()
     await daemon.start()
 
