@@ -19,11 +19,9 @@ import asyncio
 import json
 import logging
 import os
-import signal
-import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -34,24 +32,22 @@ _logger = logging.getLogger(__name__)
 # モジュール実行 (python3 -m src.api) とスクリプト実行の両方をサポート
 try:
     from .config import (
-        BASE_DIR,
-        DAEMON_LOG,
         DEFAULT_SESSION_ID,
         SOCKET_PATH,
         WEBHOOK_DEFAULT_PORT,
         WEBHOOK_PID_FILE,
+        setup_logging,
     )
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
     from src.config import (
-        BASE_DIR,
-        DAEMON_LOG,
         DEFAULT_SESSION_ID,
         SOCKET_PATH,
         WEBHOOK_DEFAULT_PORT,
         WEBHOOK_PID_FILE,
+        setup_logging,
     )
 
 
@@ -286,90 +282,6 @@ async def delete_session(session_id: str) -> DeleteSessionResponse:
 
 
 # ---------------------------------------------------------------------------
-# ロギング設定
-# ---------------------------------------------------------------------------
-
-
-def _setup_logging() -> None:
-    """API サーバー用のロギングを設定する。HH:MM:SS level メッセージ の形式で stdout に出力する。"""
-
-    class _LowerLevelFormatter(logging.Formatter):
-        def format(self, record: logging.LogRecord) -> str:
-            original = record.levelname
-            record.levelname = original.lower()
-            result = super().format(record)
-            record.levelname = original
-            return result
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(_LowerLevelFormatter(fmt="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
-    logging.root.setLevel(logging.INFO)
-    logging.root.handlers = [handler]
-
-
-# ---------------------------------------------------------------------------
-# プロセス管理 (cli.py から使用)
-# ---------------------------------------------------------------------------
-
-
-def start_webhook_process(port: int = WEBHOOK_DEFAULT_PORT) -> None:
-    """API サーバーをデタッチされたバックグラウンドプロセスとして起動する。
-
-    Args:
-        port: API サーバーがリッスンするポート番号。
-    """
-    python = sys.executable
-    with open(str(DAEMON_LOG), "a") as log:
-        subprocess.Popen(  # noqa: S603
-            [python, "-m", "src.api", "--port", str(port)],
-            cwd=str(BASE_DIR),
-            stdout=log,
-            stderr=log,
-            start_new_session=True,
-        )
-
-
-def stop_webhook_process() -> bool:
-    """PID ファイル経由で API サーバーに SIGTERM を送信する。
-
-    Returns:
-        停止シグナルの送信に成功した場合は True。
-    """
-    if not WEBHOOK_PID_FILE.exists():
-        return False
-    try:
-        pid = int(WEBHOOK_PID_FILE.read_text(encoding="utf-8").strip())
-        os.kill(pid, signal.SIGTERM)
-        return True
-    except (ValueError, ProcessLookupError, PermissionError, OSError):
-        return False
-
-
-def get_webhook_status() -> tuple[str, Optional[int]]:
-    """API サーバーのステータスと PID を返す。
-
-    Returns:
-        tuple: (status_string, pid_or_None)
-            status_string は 'running', 'stopped', 'stale' のいずれか。
-    """
-    if not WEBHOOK_PID_FILE.exists():
-        return "stopped", None
-    try:
-        pid = int(WEBHOOK_PID_FILE.read_text(encoding="utf-8").strip())
-    except (ValueError, OSError):
-        return "stopped", None
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return "stale", pid
-    except PermissionError:  # noqa: S110
-        pass  # プロセスは存在するがシグナル送信権限がない
-
-    return "running", pid
-
-
-# ---------------------------------------------------------------------------
 # エントリーポイント
 # ---------------------------------------------------------------------------
 
@@ -380,7 +292,7 @@ async def _main(port: int) -> None:
     Args:
         port: API サーバーがリッスンするポート番号。
     """
-    _setup_logging()
+    setup_logging()
     WEBHOOK_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
     _logger.info("OpenClaude API server starting on port %d (PID: %d)", port, os.getpid())
 

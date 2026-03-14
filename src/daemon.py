@@ -32,6 +32,7 @@ try:
         SESSIONS_JSON,
         SOCKET_PATH,
         WEBHOOK_DEFAULT_PORT,
+        setup_logging,
     )
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
@@ -46,29 +47,8 @@ except ImportError:
         SESSIONS_JSON,
         SOCKET_PATH,
         WEBHOOK_DEFAULT_PORT,
+        setup_logging,
     )
-
-
-# ---------------------------------------------------------------------------
-# ロギング設定
-# ---------------------------------------------------------------------------
-
-
-def _setup_logging() -> None:
-    """デーモン用のロギングを設定する。HH:MM:SS level メッセージ の形式で stdout に出力する。"""
-
-    class _LowerLevelFormatter(logging.Formatter):
-        def format(self, record: logging.LogRecord) -> str:
-            original = record.levelname
-            record.levelname = original.lower()
-            result = super().format(record)
-            record.levelname = original
-            return result
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(_LowerLevelFormatter(fmt="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
-    logging.root.setLevel(logging.INFO)
-    logging.root.handlers = [handler]
 
 
 # ---------------------------------------------------------------------------
@@ -143,20 +123,20 @@ class OpenClaudeDaemon:
             _logger.error("Invalid JSON from client: %s", e)
             try:
                 await self._send_json(writer, {"type": "error", "message": f"Invalid JSON: {e}"})
-            except Exception:  # noqa: S110
-                pass
+            except Exception as send_err:
+                _logger.debug("Failed to send JSON decode error to client: %s", send_err)
         except Exception as e:
             _logger.error("Unhandled error in handle_client: %s", e)
             try:
                 await self._send_json(writer, {"type": "error", "message": str(e)})
-            except Exception:  # noqa: S110
-                pass
+            except Exception as send_err:
+                _logger.debug("Failed to send error response to client: %s", send_err)
         finally:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception:  # noqa: S110
-                pass
+            except Exception as close_err:
+                _logger.debug("Failed to close writer: %s", close_err)
 
     # ------------------------------------------------------------------
     # リクエストハンドラー
@@ -328,12 +308,13 @@ class OpenClaudeDaemon:
         for sdk_session_id in list(self._sessions.values()):
             if sdk_session_id:
                 jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
-                if jsonl_path.exists():
-                    try:
-                        jsonl_path.unlink()
-                        deleted_files.append(jsonl_path.name)
-                    except Exception as e:
-                        failed_files.append(f"{jsonl_path.name}: {e}")
+                try:
+                    jsonl_path.unlink()
+                    deleted_files.append(jsonl_path.name)
+                except FileNotFoundError:
+                    _logger.debug("cleanup_sessions: JSONL already absent: %s", jsonl_path.name)
+                except Exception as e:
+                    failed_files.append(f"{jsonl_path.name}: {e}")
 
         self._sessions = {}
         self._save_sessions()
@@ -367,12 +348,13 @@ class OpenClaudeDaemon:
         failed: Optional[str] = None
 
         jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
-        if jsonl_path.exists():
-            try:
-                jsonl_path.unlink()
-                deleted_file = jsonl_path.name
-            except Exception as e:
-                failed = f"{jsonl_path.name}: {e}"
+        try:
+            jsonl_path.unlink()
+            deleted_file = jsonl_path.name
+        except FileNotFoundError:
+            _logger.debug("delete_session: JSONL already absent: %s", jsonl_path.name)
+        except Exception as e:
+            failed = f"{jsonl_path.name}: {e}"
 
         del self._sessions[session_alias]
         self._save_sessions()
@@ -398,10 +380,12 @@ class OpenClaudeDaemon:
         last_active: Optional[str] = None
         total_tokens = 0
 
-        if not jsonl_path.exists():
+        try:
+            lines = jsonl_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
             return {"last_active": None, "total_tokens": 0}
 
-        for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
+        for raw in lines:
             try:
                 entry = json.loads(raw)
             except json.JSONDecodeError as e:
@@ -422,10 +406,11 @@ class OpenClaudeDaemon:
     def _load_sessions(self) -> dict[str, str]:
         """sessions.json から alias → sdk_session_id を読み込む。"""
         try:
-            if SESSIONS_JSON.exists():
-                data = json.loads(SESSIONS_JSON.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return {str(k): str(v) for k, v in data.items()}
+            data = json.loads(SESSIONS_JSON.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except FileNotFoundError:
+            _logger.debug("sessions.json not found, starting with empty sessions")
         except Exception as e:
             _logger.warning("Failed to load sessions: %s", e)
         return {}
@@ -494,17 +479,16 @@ def stop_daemon_process() -> bool:
                 break
         sock.close()
         return True
-    except Exception:  # noqa: S110
-        pass
+    except Exception as e:
+        _logger.debug("stop_daemon_process: socket stop failed, falling back to PID: %s", e)
 
     # フォールバック: PID ファイル経由で SIGTERM を送信
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text().strip())
-            os.kill(pid, signal.SIGTERM)
-            return True
-        except Exception:  # noqa: S110
-            pass
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError, OSError) as e:
+        _logger.debug("stop_daemon_process: PID fallback failed: %s", e)
 
     return False
 
@@ -516,12 +500,9 @@ def get_daemon_status() -> tuple[str, Optional[int]]:
         tuple: (status_string, pid_or_None)
             status_string は 'running', 'stopped', 'stale' のいずれか。
     """
-    if not PID_FILE.exists():
-        return "stopped", None
-
     try:
-        pid = int(PID_FILE.read_text().strip())
-    except Exception:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError, OSError):
         return "stopped", None
 
     # プロセスが生存しているか確認
@@ -529,8 +510,8 @@ def get_daemon_status() -> tuple[str, Optional[int]]:
         os.kill(pid, 0)
     except ProcessLookupError:
         return "stale", pid
-    except PermissionError:  # noqa: S110
-        pass  # プロセスは存在するがシグナル送信権限がない
+    except PermissionError as e:
+        _logger.debug("get_daemon_status: cannot signal PID %d (no permission): %s", pid, e)
 
     # ソケット接続を確認
     if SOCKET_PATH.exists():
@@ -552,10 +533,11 @@ async def _main(port: int) -> None:
     """
     # setting_sources=["project"] が .claude/settings.json を参照できるよう CWD を設定
     os.chdir(str(BASE_DIR))
-    _setup_logging()
+    setup_logging()
 
     try:
         import uvicorn  # noqa: PLC0415
+
         from .api import app as api_app  # noqa: PLC0415
     except ImportError as e:
         _logger.warning("API server disabled (fastapi/uvicorn not installed): %s", e)
