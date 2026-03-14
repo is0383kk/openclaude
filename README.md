@@ -149,6 +149,20 @@ openclaude --message "プロンプト"
 openclaude -m "プロンプト"
 ```
 
+### パイプ / stdin からメッセージを送る
+
+パイプや標準入力からもメッセージを受け取れます。
+
+```bash
+# stdin の内容をそのままメッセージとして送る
+echo "こんにちは" | openclaude
+openclaude < query.txt
+
+# stdin の内容を前置きし、-m を命令として結合して送る
+cat report.txt | openclaude -m "これを要約して"
+git diff | openclaude -m "このdiffをレビューして"
+```
+
 ### 実行例
 
 ```
