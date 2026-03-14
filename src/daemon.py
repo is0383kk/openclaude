@@ -103,6 +103,8 @@ class OpenClaudeDaemon:
                 await self.handle_query(request, writer)
             elif req_type == "sessions":
                 await self.handle_sessions(writer)
+            elif req_type == "cleanup_sessions":
+                await self.handle_cleanup_sessions(writer)
             elif req_type == "stop":
                 await self.handle_stop(writer)
             else:
@@ -273,6 +275,33 @@ class OpenClaudeDaemon:
         await self._send_json(writer, {"type": "stopped"})
         # レスポンスのフラッシュを待ってからシャットダウン
         asyncio.get_running_loop().call_later(0.2, self._shutdown_event.set)
+
+    async def handle_cleanup_sessions(self, writer: asyncio.StreamWriter) -> None:
+        """全セッションのメモリ・sessions.json・JSONL ファイルを削除する。"""
+        deleted_files: list[str] = []
+        failed_files: list[str] = []
+
+        for sdk_session_id in list(self._sessions.values()):
+            if sdk_session_id:
+                jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
+                if jsonl_path.exists():
+                    try:
+                        jsonl_path.unlink()
+                        deleted_files.append(jsonl_path.name)
+                    except Exception as e:
+                        failed_files.append(f"{jsonl_path.name}: {e}")
+
+        self._sessions = {}
+        self._save_sessions()
+
+        await self._send_json(
+            writer,
+            {
+                "type": "cleanup_done",
+                "deleted_count": len(deleted_files),
+                "failed": failed_files,
+            },
+        )
 
     # ------------------------------------------------------------------
     # ヘルパー

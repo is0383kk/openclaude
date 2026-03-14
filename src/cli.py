@@ -6,6 +6,7 @@
     openclaude restart
     openclaude status
     openclaude sessions
+    openclaude sessions cleanup
     openclaude [--session-id ID] --message TEXT
     openclaude [--session-id ID] -m TEXT
 """
@@ -60,7 +61,10 @@ class OpenClaudeCLI:
         elif args.command == "status":
             self.cmd_status()
         elif args.command == "sessions":
-            asyncio.run(self.cmd_sessions())
+            if getattr(args, "sessions_command", None) == "cleanup":
+                asyncio.run(self.cmd_sessions_cleanup())
+            else:
+                asyncio.run(self.cmd_sessions())
         elif args.message is not None:
             asyncio.run(self.cmd_message(args.session_id, args.message))
         else:
@@ -77,7 +81,9 @@ class OpenClaudeCLI:
         subparsers.add_parser("stop", help="Stop the OpenClaude daemon")
         subparsers.add_parser("restart", help="Restart the OpenClaude daemon")
         subparsers.add_parser("status", help="Show daemon status")
-        subparsers.add_parser("sessions", help="List conversation sessions")
+        sessions_parser = subparsers.add_parser("sessions", help="Manage conversation sessions")
+        sessions_sub = sessions_parser.add_subparsers(dest="sessions_command")
+        sessions_sub.add_parser("cleanup", help="Clean up all sessions")
 
         # 会話モード
         parser.add_argument(
@@ -193,6 +199,33 @@ class OpenClaudeCLI:
             last_active = s.get("last_active") or "-"
             total_tokens = s.get("total_tokens", 0)
             print(f"{alias:<{col_id}}  {sdk_id:<{col_sdk}}  {last_active:<{col_la}}  {total_tokens}")
+
+    async def cmd_sessions_cleanup(self) -> None:
+        """全セッションをクリーンアップする。"""
+        if not self._is_daemon_up():
+            print("OpenClaude daemon is not running.")
+            return
+
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+            writer.write((json.dumps({"type": "cleanup_sessions"}) + "\n").encode("utf-8"))
+            await writer.drain()
+
+            response = await self._read_json(reader)
+            writer.close()
+            await writer.wait_closed()
+
+            if response.get("type") == "cleanup_done":
+                count = response.get("deleted_count", 0)
+                print(f"Cleaned up {count} session(s).")
+                for f in response.get("failed", []):
+                    print(f"  [warn] {f}", file=sys.stderr)
+            elif response.get("type") == "error":
+                print(f"ERROR: {response.get('message')}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
 
     async def _fetch_sessions(self) -> list[dict[str, Any]]:
         """デーモンに接続してセッション一覧を取得する。デーモン未起動時は空リストを返す。"""
