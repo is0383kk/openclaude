@@ -171,6 +171,126 @@ openclaude --session-id main --message "私の名前はなんでしたか？"
 
 ---
 
+## Webhook サーバー
+
+外部から HTTP で AI にメッセージを送ることができます。curl・GitHub Webhooks・外部スクリプトからの利用に適しています。
+
+### 起動・停止
+
+API サーバーはデーモンと同一プロセスで動作します。`openclaude start` を実行するだけで自動的に起動します。
+
+```bash
+# デフォルトポート（28789）で起動
+openclaude start
+
+# ポートを指定して起動
+openclaude start --port 18789
+
+# 停止（API サーバーも同時に停止）
+openclaude stop
+```
+
+### POST /message
+
+```bash
+curl -X POST http://localhost:28789/message \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "main", "message": "こんにちは"}'
+```
+
+レスポンス例:
+
+```json
+{
+  "session_id": "main",
+  "response": "こんにちは！何かお手伝いできることはありますか？",
+  "stop_reason": "end_turn"
+}
+```
+
+| フィールド | 説明 |
+|---|---|
+| `session_id` | セッション ID（省略時は `main`） |
+| `message` | 送信するメッセージ（必須） |
+
+### GET /status
+
+デーモンのステータスと PID を返します。
+
+```bash
+curl http://localhost:28789/status
+```
+
+レスポンス例:
+
+```json
+{
+  "status": "running",
+  "pid": 12345
+}
+```
+
+### GET /sessions
+
+セッション一覧を返します。
+
+```bash
+curl http://localhost:28789/sessions
+```
+
+レスポンス例:
+
+```json
+{
+  "sessions": [
+    {
+      "session_id": "main",
+      "sdk_session_id": "XXXXXXXXXXXXXXXXXXX",
+      "last_active": "2026-03-13T17:49:54.126Z",
+      "total_tokens": 5743
+    }
+  ],
+  "total": 1
+}
+```
+
+### DELETE /sessions/{session_id}
+
+指定したセッションを削除します。
+
+```bash
+curl -X DELETE http://localhost:28789/sessions/main
+```
+
+レスポンス例:
+
+```json
+{
+  "session_id": "main",
+  "deleted_file": "XXXXXXXXXXXXXXXXXXX.jsonl",
+  "failed": null
+}
+```
+
+### DELETE /sessions
+
+全セッションを削除します。
+
+```bash
+curl -X DELETE http://localhost:28789/sessions
+```
+
+レスポンス例:
+
+```json
+{
+  "deleted_count": 2,
+  "failed": []
+}
+```
+
+---
+
 ## セッション管理
 
 ### セッション一覧の確認

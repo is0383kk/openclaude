@@ -1,9 +1,9 @@
 """OpenClaude CLI - コマンド引数の解析と実行。
 
 コマンド一覧:
-    openclaude start
+    openclaude start [--port PORT]
     openclaude stop
-    openclaude restart
+    openclaude restart [--port PORT]
     openclaude status
     openclaude logs [--tail N]
     openclaude sessions
@@ -22,13 +22,13 @@ from pathlib import Path
 from typing import Any, cast
 
 try:
-    from .config import CLAUDE_PROJECTS_DIR, DAEMON_LOG, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
+    from .config import CLAUDE_PROJECTS_DIR, DAEMON_LOG, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH, WEBHOOK_DEFAULT_PORT
     from .daemon import get_daemon_status, start_daemon_process, stop_daemon_process
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
-    from src.config import DAEMON_LOG, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH
+    from src.config import DAEMON_LOG, DEFAULT_SESSION_ID, PID_FILE, SOCKET_PATH, WEBHOOK_DEFAULT_PORT
     from src.daemon import get_daemon_status, start_daemon_process, stop_daemon_process
 
 _CRAB = "🦀"
@@ -55,11 +55,11 @@ class OpenClaudeCLI:
         args = parser.parse_args()
 
         if args.command == "start":
-            self.cmd_start()
+            self.cmd_start(getattr(args, "port", WEBHOOK_DEFAULT_PORT))
         elif args.command == "stop":
             self.cmd_stop()
         elif args.command == "restart":
-            self.cmd_restart()
+            self.cmd_restart(getattr(args, "port", WEBHOOK_DEFAULT_PORT))
         elif args.command == "status":
             self.cmd_status()
         elif args.command == "logs":
@@ -83,9 +83,23 @@ class OpenClaudeCLI:
         )
 
         subparsers = parser.add_subparsers(dest="command")
-        subparsers.add_parser("start", help="Start the OpenClaude daemon")
+        start_parser = subparsers.add_parser("start", help="Start the OpenClaude daemon")
+        start_parser.add_argument(
+            "--port",
+            type=int,
+            default=WEBHOOK_DEFAULT_PORT,
+            metavar="PORT",
+            help=f"Port for the API server (default: {WEBHOOK_DEFAULT_PORT})",
+        )
         subparsers.add_parser("stop", help="Stop the OpenClaude daemon")
-        subparsers.add_parser("restart", help="Restart the OpenClaude daemon")
+        restart_parser = subparsers.add_parser("restart", help="Restart the OpenClaude daemon")
+        restart_parser.add_argument(
+            "--port",
+            type=int,
+            default=WEBHOOK_DEFAULT_PORT,
+            metavar="PORT",
+            help=f"Port for the API server (default: {WEBHOOK_DEFAULT_PORT})",
+        )
         subparsers.add_parser("status", help="Show daemon status")
         logs_parser = subparsers.add_parser("logs", help="Show daemon log")
         logs_parser.add_argument(
@@ -120,8 +134,8 @@ class OpenClaudeCLI:
     # ------------------------------------------------------------------
     # デーモン管理コマンド
     # ------------------------------------------------------------------
-    def cmd_start(self) -> None:
-        """デーモンを起動する。既に起動済みの場合はメッセージを表示して終了する。"""
+    def cmd_start(self, port: int = WEBHOOK_DEFAULT_PORT) -> None:
+        """デーモンと API サーバーを起動する。既に起動済みの場合はメッセージを表示して終了する。"""
         status, pid = get_daemon_status()
         if status == "running":
             print(f"OpenClaude is already running (PID: {pid})")
@@ -132,7 +146,7 @@ class OpenClaudeCLI:
             PID_FILE.unlink(missing_ok=True)
 
         print("Starting OpenClaude daemon...")
-        start_daemon_process()
+        start_daemon_process(port)
 
         # ソケットファイルが現れるまで最大15秒待機
         for _ in range(150):
@@ -169,11 +183,11 @@ class OpenClaudeCLI:
             print("ERROR: Failed to stop OpenClaude.", file=sys.stderr)
             sys.exit(1)
 
-    def cmd_restart(self) -> None:
-        """デーモンを再起動する。"""
+    def cmd_restart(self, port: int = WEBHOOK_DEFAULT_PORT) -> None:
+        """デーモンと API サーバーを再起動する。"""
         self.cmd_stop()
         time.sleep(0.5)
-        self.cmd_start()
+        self.cmd_start(port)
 
     def cmd_status(self) -> None:
         """デーモンの稼働状態を表示する。"""

@@ -7,6 +7,7 @@
     python3 src/daemon.py          (sys.path 調整あり)
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -30,6 +31,7 @@ try:
         SESSIONS_DIR,
         SESSIONS_JSON,
         SOCKET_PATH,
+        WEBHOOK_DEFAULT_PORT,
     )
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
@@ -43,6 +45,7 @@ except ImportError:
         SESSIONS_DIR,
         SESSIONS_JSON,
         SOCKET_PATH,
+        WEBHOOK_DEFAULT_PORT,
     )
 
 
@@ -449,13 +452,17 @@ class OpenClaudeDaemon:
 # ---------------------------------------------------------------------------
 
 
-def start_daemon_process() -> None:
-    """デーモンをデタッチされたバックグラウンドプロセスとして起動する。"""
+def start_daemon_process(port: int = WEBHOOK_DEFAULT_PORT) -> None:
+    """デーモンをデタッチされたバックグラウンドプロセスとして起動する。
+
+    Args:
+        port: API サーバーがリッスンするポート番号。
+    """
     python = sys.executable
 
     with open(str(DAEMON_LOG), "a") as log:
         subprocess.Popen(  # noqa: S603
-            [python, "-m", "src.daemon"],
+            [python, "-m", "src.daemon", "--port", str(port)],
             cwd=str(BASE_DIR),
             stdout=log,
             stderr=log,
@@ -537,13 +544,44 @@ def get_daemon_status() -> tuple[str, Optional[int]]:
 # ---------------------------------------------------------------------------
 
 
-async def _main() -> None:
+async def _main(port: int) -> None:
+    """デーモンと API サーバーを起動してシャットダウンまで待機する。
+
+    Args:
+        port: API サーバーがリッスンするポート番号。
+    """
     # setting_sources=["project"] が .claude/settings.json を参照できるよう CWD を設定
     os.chdir(str(BASE_DIR))
     _setup_logging()
+
+    try:
+        import uvicorn  # noqa: PLC0415
+        from .api import app as api_app  # noqa: PLC0415
+    except ImportError as e:
+        _logger.warning("API server disabled (fastapi/uvicorn not installed): %s", e)
+        daemon = OpenClaudeDaemon()
+        await daemon.start()
+        return
+
+    # uvicorn がシグナルハンドラーを上書きしないようサブクラス化
+    class _NoSignalServer(uvicorn.Server):
+        def install_signal_handlers(self) -> None:
+            pass  # daemon 側のシグナルハンドラーを維持するため何もしない
+
     daemon = OpenClaudeDaemon()
-    await daemon.start()
+    api_config = uvicorn.Config(api_app, host="0.0.0.0", port=port, log_level="info")  # noqa: S104
+    api_server = _NoSignalServer(api_config)
+
+    async def _run_daemon() -> None:
+        await daemon.start()
+        api_server.should_exit = True  # daemon 停止後に API も停止
+
+    _logger.info("OpenClaude API server will start on port %d", port)
+    await asyncio.gather(_run_daemon(), api_server.serve())
 
 
 if __name__ == "__main__":
-    asyncio.run(_main())
+    _parser = argparse.ArgumentParser(description="OpenClaude Daemon")
+    _parser.add_argument("--port", type=int, default=WEBHOOK_DEFAULT_PORT, metavar="PORT")
+    _args = _parser.parse_args()
+    asyncio.run(_main(_args.port))
