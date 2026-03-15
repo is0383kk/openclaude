@@ -1,354 +1,193 @@
-> [!WARNING]
-> このリポジトリは開発途中です。ソースコードや各種ドキュメントは不完全です。  
-> This repository is under development. The source code and documentation are incomplete.
+<table>
+  <thead>
+      <tr>
+          <th style="text-align:center">English</th>
+          <th style="text-align:center"><a href="./README_cn.md">Chinese</a></th>
+          <th style="text-align:center"><a href="./README_ja.md">日本語</a></th>
+      </tr>
+    </thead>
+</table>
 
-# OpenClaude
+# 🦀OpenClaude — Claude Code-native personal AI assistant
 
-claude-agent-sdk を使った常駐型 AI エージェントシステム  
-Unix ソケットサーバーとして常駐し OpenClaw のように24時間稼働し続けます
+A persistent AI agent system built with `claude-agent-sdk`. Operates based on Claude Code's `settings.json`.  
+This project is inspired by [OpenClaw](https://github.com/openclaw/openclaw).  
+Runs as a Unix socket server, accepting messages from the CLI and REST API and proxying them to Claude.
 
 ---
 
-## 動作環境
+## Features
 
-- OS: Linux（Ubuntu 24.04で動作確認済み）
-- Python: 3.10 以上
-- `claude-agent-sdk` v0.1.48 以上
+| Feature                                | Command / Endpoint                                           |
+| -------------------------------------- | ------------------------------------------------------------ |
+| Daemon start / stop / restart / status | `openclaude start/stop/restart/status`                       |
+| Send message (streaming)               | `openclaude -m "message"`                                    |
+| stdin / pipe input                     | `echo "question" \| openclaude`                              |
+| View logs                              | `openclaude logs [--tail N]`                                 |
+| Session management                     | `openclaude sessions`                                        |
+| Cron job management                    | `openclaude cron add/list/delete/run`                        |
+| HTTP REST API                          | `POST /message`, `POST /message/stream`, `GET /status`, etc. |
+| Cron REST API                          | `GET /cron`, `POST /cron`, `DELETE /cron/{id}`, etc.         |
 
 ---
 
-## セットアップ
+## Setup
 
-### 1. プロジェクトの配置
+### Prerequisites
 
-`/home/ユーザ名/.openclaude`となるようにプロジェクトを配置する
+- Linux / Windows (WSL2)
+- Python >= 3.14
+- [An environment where claude-agent-sdk is available](https://platform.claude.com/docs/en/agent-sdk/overview)
 
-### 2. 依存ライブラリのインストール
+### Dependencies
+
+| Package                    | Purpose                   |
+| -------------------------- | ------------------------- |
+| `claude-agent-sdk>=0.1.48` | Claude AI Agent SDK       |
+| `fastapi>=0.115.0`         | REST API framework        |
+| `uvicorn>=0.30.0`          | ASGI server               |
+| `apscheduler>=3.10,<4`     | Cron job scheduler (v3.x) |
+
+### Installation
 
 ```bash
+git clone <repository-url> ~/.openclaude
+cd ~/.openclaude
 pip install -r requirements.txt
 ```
 
-### 3. 設定ファイルの確認
-
-`.claude/settings.json` に 必要な項目を追記  
-`ClaudeAgentOptions`の`setting_sources=["project"]` により、デーモン起動時にこのファイルが自動的に読み込まれます。
-
-```json
-.openclaude/
-└── .claude/
-    └── settings.json
-```
-
-### 4. PATH の設定
-
-```bash
-echo 'export PATH="$HOME/.openclaude:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### 5. systemd サービスの登録（任意）
-
-`systemctl` コマンドで起動・停止したい場合は以下を実行してください。  
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp ~/.openclaude/openclaude.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable openclaude.service
-```
-
-> **注意**: `openclaude.service` 内の `ExecStart` に記載された `python3` が
-> `claude-agent-sdk` をインストールした Python であることを確認してください。
-> `which python3` で確認できます。
+> **Note:** The project must be placed in `~/.openclaude/`.
+> Since `src/config.py` uses `Path.home() / ".openclaude"` as the base path, it will not work in a different directory.
 
 ---
 
-## プロジェクト構成
+## Usage
 
-```
-.openclaude/
-├── openclaude              # CLI 実行スクリプト (chmod +x)
-├── openclaude.service      # systemd ユーザーサービス テンプレート
-├── requirements.txt
-├── .claude/
-│   └── settings.json       # AWS Bedrock 設定（認証情報・モデル）
-├── src/
-│   ├── __init__.py
-│   ├── config.py           # パス定数
-│   ├── session_store.py    # セッション永続化
-│   ├── daemon.py           # Unix ソケットサーバー本体
-│   └── cli.py              # CLI コマンド実装
-└── sessions/               # セッションデータ（初回起動時に自動生成）
-    ├── sessions.json       # セッションメタデータ一覧
-    └── {session-id}.jsonl  # セッションごとの会話履歴
-```
-
----
-
-## 基本コマンド
-
-### デーモンの起動・停止
+### Daemon Management
 
 ```bash
-# 起動
+# Start (default port: 28789)
 openclaude start
 
-# 停止
+# Start with a specific port
+openclaude start --port 18789
+
+# Stop
 openclaude stop
 
-# 再起動
+# Restart
 openclaude restart
 
-# 状態確認
+# Check status
 openclaude status
+
+# View logs
+openclaude logs           # full output
+openclaude logs --tail 50 # last 50 lines
 ```
 
-systemd 経由でも操作できます。
+### Sending Messages
+
+```bash
+# Simple send
+openclaude -m "prompt"
+
+# Specify a session
+openclaude --session-id work -m "prompt"
+
+# stdin / pipe
+echo "question" | openclaude
+cat report.txt | openclaude -m "Summarize this"
+git diff | openclaude -m "Review this diff"
+```
+
+### Session Management
+
+```bash
+# List sessions
+openclaude sessions
+
+# Delete all sessions
+openclaude sessions cleanup
+
+# Delete a specific session
+openclaude sessions delete <session-id>
+```
+
+### Cron Jobs
+
+```bash
+# Add a job (runs every morning at 9:00)
+openclaude cron add "0 9 * * *" --name "morning" --session main -m "Organize today's tasks"
+
+# List jobs
+openclaude cron list
+
+# Run manually
+openclaude cron run <job-id>
+
+# Delete a job
+openclaude cron delete <job-id>
+```
+
+### systemd Integration (if configured)
 
 ```bash
 systemctl --user start openclaude
 systemctl --user stop openclaude
-systemctl --user restart openclaude
 systemctl --user status openclaude
 ```
 
 ---
 
-### ログの確認
+## REST API
 
-デーモンのログ（`~/.openclaude/daemon.log`）を表示します。
+After starting the daemon, it is accessible at `http://localhost:28789` by default.
 
-```bash
-# 全ログを表示
-openclaude logs
-
-# 末尾 N 行のみ表示
-openclaude logs --tail 50
-```
-
----
-
-## 会話セッションの使い方
-
-### メッセージを送る
-
-```bash
-openclaude --session-id main --message "プロンプト"
-```
-
-`--session-id` を省略すると `main` が使用されます。
-
-```bash
-openclaude --message "プロンプト"
-```
-
-短縮形 `-m` も使えます。
-
-```bash
-openclaude -m "プロンプト"
-```
-
-### パイプ / stdin からメッセージを送る
-
-パイプや標準入力からもメッセージを受け取れます。
-
-```bash
-# stdin の内容をそのままメッセージとして送る
-echo "こんにちは" | openclaude
-openclaude < query.txt
-
-# stdin の内容を前置きし、-m を命令として結合して送る
-cat report.txt | openclaude -m "これを要約して"
-git diff | openclaude -m "このdiffをレビューして"
-```
-
-### 実行例
-
-```
-$ openclaude --session-id main --message "こんにちは、私はis0383kkです"
-
-🦀 OpenClaude（main）
-│
-◇
-こんにちは、is0383kk さん！何かお手伝いできることはありますか？
-```
-
-### セッションの継続
-
-同じ `--session-id` を指定すると、前回の会話コンテキストが引き継がれます。
-
-```bash
-openclaude --session-id main --message "私の名前はなんでしたか？"
-# → "is0383kk さん" と答えてくれる
-```
+| Method   | Path              | Description                  |
+| -------- | ----------------- | ---------------------------- |
+| `POST`   | `/message`        | Send message (full response) |
+| `POST`   | `/message/stream` | Send message (SSE streaming) |
+| `GET`    | `/status`         | Daemon status and PID        |
+| `GET`    | `/sessions`       | List sessions                |
+| `DELETE` | `/sessions`       | Delete all sessions          |
+| `DELETE` | `/sessions/{id}`  | Delete a specific session    |
+| `GET`    | `/cron`           | List cron jobs               |
+| `POST`   | `/cron`           | Add a cron job               |
+| `DELETE` | `/cron/{id}`      | Delete a cron job            |
+| `POST`   | `/cron/{id}/run`  | Run a cron job manually      |
 
 ---
 
-## Webhook サーバー
-
-外部から HTTP で AI にメッセージを送ることができます。curl・GitHub Webhooks・外部スクリプトからの利用に適しています。
-
-### 起動・停止
-
-API サーバーはデーモンと同一プロセスで動作します。`openclaude start` を実行するだけで自動的に起動します。
-
-```bash
-# デフォルトポート（28789）で起動
-openclaude start
-
-# ポートを指定して起動
-openclaude start --port 18789
-
-# 停止（API サーバーも同時に停止）
-openclaude stop
-```
-
-### POST /message
-
-```bash
-curl -X POST http://localhost:28789/message \
-  -H "Content-Type: application/json" \
-  -d '{"session_id": "main", "message": "こんにちは"}'
-```
-
-レスポンス例:
-
-```json
-{
-  "session_id": "main",
-  "response": "こんにちは！何かお手伝いできることはありますか？",
-  "stop_reason": "end_turn"
-}
-```
-
-| フィールド | 説明 |
-|---|---|
-| `session_id` | セッション ID（省略時は `main`） |
-| `message` | 送信するメッセージ（必須） |
-
-### POST /message/stream
-
-`text/event-stream` 形式でレスポンスをリアルタイムにストリーミングします。
-
-```bash
-curl -N -X POST http://localhost:28789/message/stream \
-  -H "Content-Type: application/json" \
-  -d '{"session_id": "main", "message": "こんにちは"}'
-```
-
-レスポンス例（SSE イベントストリーム）:
+## Architecture
 
 ```
-data: {"type": "chunk", "text": "こんにちは"}
+CLI (openclaude)
+  └── src/cli.py
+        └── Communicates with daemon via Unix socket (~/.openclaude/openclaude.sock)
 
-data: {"type": "chunk", "text": "！何かお手伝いできることはありますか？"}
-
-data: {"type": "done", "stop_reason": "end_turn", "model": "...", "input_tokens": 10, "output_tokens": 15, "total_cost_usd": 0.0001, "num_turns": 1}
-
+Daemon + API server (same process)
+  ├── src/daemon.py  ── Unix socket server
+  ├── src/api.py     ── FastAPI + uvicorn (REST API)
+  └── src/cron.py    ── apscheduler-based scheduler
 ```
 
-| イベント type | 内容 |
-|---|---|
-| `chunk` | テキストチャンク（`text` フィールドを含む） |
-| `done` | 完了シグナル（`stop_reason`, `model`, `input_tokens`, `output_tokens` 等を含む） |
-| `error` | エラーメッセージ（`message` フィールドを含む） |
+### File Structure
 
-### GET /status
-
-デーモンのステータスと PID を返します。
-
-```bash
-curl http://localhost:28789/status
 ```
-
-レスポンス例:
-
-```json
-{
-  "status": "running",
-  "pid": 12345
-}
+~/.openclaude/
+  ├── src/
+  │   ├── config.py    # File path constants and logging configuration
+  │   ├── daemon.py    # Unix socket server and message handlers
+  │   ├── api.py       # FastAPI REST API server
+  │   ├── cron.py      # Cron job management (CronJob / CronScheduler)
+  │   └── cli.py       # CLI entry point
+  ├── sessions/
+  │   └── sessions.json         # Session alias -> SDK session ID mapping
+  ├── cron/
+  │   ├── jobs.json             # Cron job definitions (persisted)
+  │   └── runs/<job_id>.jsonl   # Execution history
+  ├── openclaude.sock           # Unix socket (only while running)
+  ├── openclaude.pid            # PID file (only while running)
+  └── daemon.log                # Daemon log
 ```
-
-### GET /sessions
-
-セッション一覧を返します。
-
-```bash
-curl http://localhost:28789/sessions
-```
-
-レスポンス例:
-
-```json
-{
-  "sessions": [
-    {
-      "session_id": "main",
-      "sdk_session_id": "XXXXXXXXXXXXXXXXXXX",
-      "last_active": "2026-03-13T17:49:54.126Z",
-      "total_tokens": 5743
-    }
-  ],
-  "total": 1
-}
-```
-
-### DELETE /sessions/{session_id}
-
-指定したセッションを削除します。
-
-```bash
-curl -X DELETE http://localhost:28789/sessions/main
-```
-
-レスポンス例:
-
-```json
-{
-  "session_id": "main",
-  "deleted_file": "XXXXXXXXXXXXXXXXXXX.jsonl",
-  "failed": null
-}
-```
-
-### DELETE /sessions
-
-全セッションを削除します。
-
-```bash
-curl -X DELETE http://localhost:28789/sessions
-```
-
-レスポンス例:
-
-```json
-{
-  "deleted_count": 2,
-  "failed": []
-}
-```
-
----
-
-## セッション管理
-
-### セッション一覧の確認
-
-```bash
-$ openclaude sessions
-🦀 OpenClaude
-
-Sessions: 1
-Sessions Path: /home/ユーザ名/.claude/projects/-home-ユーザ名--openclaude
-
-session-id  sdk_session_id                        last_active               total_tokens
-main        XXXXXXXXXXXXXXXXXXX  2026-03-13T17:49:54.126Z  5743
-```
-
-### セッションデータの保存場所
-
-| ファイル                      | 内容                                                         |
-| ----------------------------- | ------------------------------------------------------------ |
-| `sessions/sessions.json`      | Claude側で管理されているセッション情報と紐づくセッションID |
