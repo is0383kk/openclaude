@@ -28,7 +28,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 _logger = logging.getLogger(__name__)
 
@@ -115,6 +115,38 @@ class StatusResponse(BaseModel):
 
     status: str
     pid: int
+
+
+class CronAddRequest(BaseModel):
+    """POST /cron のリクエストボディ。"""
+
+    name: str | None = None
+    schedule: str
+    session_id: str = DEFAULT_SESSION_ID
+    message: str = Field(min_length=1)
+
+
+class CronJobResponse(BaseModel):
+    """Cron ジョブ情報。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    name: str
+    schedule: str
+    session_id: str
+    message: str
+    enabled: bool
+    created_at: str
+    last_run_at: str | None = None
+    last_run_status: str | None = None
+
+
+class CronListResponse(BaseModel):
+    """GET /cron のレスポンスボディ。"""
+
+    jobs: list[CronJobResponse]
+    total: int
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +322,94 @@ async def post_message(request: MessageRequest) -> MessageResponse:
         total_cost_usd=done_resp.get("total_cost_usd"),
         num_turns=done_resp.get("num_turns"),
     )
+
+
+@app.get("/cron")
+async def get_cron() -> CronListResponse:
+    """Cron ジョブ一覧を取得する。
+
+    Returns:
+        Cron ジョブ一覧と件数。
+
+    Raises:
+        HTTPException: デーモンが起動していない場合（503）またはエラーが発生した場合（500）。
+    """
+    resp = await _request_daemon({"type": "cron_list"})
+    if resp.get("type") == "error":
+        raise HTTPException(status_code=500, detail=resp.get("message", "Unknown error"))
+    jobs = [CronJobResponse(**j) for j in resp.get("jobs", [])]
+    return CronListResponse(jobs=jobs, total=len(jobs))
+
+
+@app.post("/cron", status_code=201)
+async def post_cron(request: CronAddRequest) -> CronJobResponse:
+    """Cron ジョブを追加する。
+
+    Args:
+        request: cron 式・セッション ID・メッセージを含むリクエスト。
+
+    Returns:
+        追加された Cron ジョブ情報。
+
+    Raises:
+        HTTPException: 不正な cron 式（422）、デーモン未起動（503）、エラー（500）。
+    """
+    resp = await _request_daemon(
+        {
+            "type": "cron_add",
+            "name": request.name,
+            "schedule": request.schedule,
+            "session_id": request.session_id,
+            "message": request.message,
+        }
+    )
+    if resp.get("type") == "error":
+        msg = resp.get("message", "Unknown error")
+        status_code = 422 if "invalid cron" in msg.lower() else 500
+        raise HTTPException(status_code=status_code, detail=msg)
+    return CronJobResponse.model_validate(resp)
+
+
+@app.delete("/cron/{job_id}")
+async def delete_cron(job_id: str) -> dict[str, str]:
+    """Cron ジョブを削除する。
+
+    Args:
+        job_id: 削除するジョブの ID。
+
+    Returns:
+        削除されたジョブ ID を含む辞書。
+
+    Raises:
+        HTTPException: ジョブが見つからない場合（404）、デーモン未起動（503）、エラー（500）。
+    """
+    resp = await _request_daemon({"type": "cron_delete", "job_id": job_id})
+    if resp.get("type") == "error":
+        msg = resp.get("message", "Unknown error")
+        status_code = 404 if "not found" in msg.lower() else 500
+        raise HTTPException(status_code=status_code, detail=msg)
+    return {"job_id": resp.get("job_id", job_id)}
+
+
+@app.post("/cron/{job_id}/run")
+async def run_cron(job_id: str) -> dict[str, str]:
+    """Cron ジョブを手動で即時実行する。
+
+    Args:
+        job_id: 実行するジョブの ID。
+
+    Returns:
+        実行開始したジョブ ID を含む辞書。
+
+    Raises:
+        HTTPException: ジョブが見つからない場合（404）、デーモン未起動（503）、エラー（500）。
+    """
+    resp = await _request_daemon({"type": "cron_run", "job_id": job_id})
+    if resp.get("type") == "error":
+        msg = resp.get("message", "Unknown error")
+        status_code = 404 if "not found" in msg.lower() else 500
+        raise HTTPException(status_code=status_code, detail=msg)
+    return {"job_id": resp.get("job_id", job_id), "status": "started"}
 
 
 @app.get("/status")

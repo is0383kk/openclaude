@@ -25,6 +25,11 @@ CLAUDE_PROJECTS_DIR: Path = Path.home() / ".claude" / "projects" / _projects_dir
 WEBHOOK_PID_FILE: Path = BASE_DIR / "webhook.pid"
 WEBHOOK_DEFAULT_PORT: int = 28789
 
+# Cron ジョブ関連のファイルパス
+CRON_DIR: Path = BASE_DIR / "cron"
+CRON_JOBS_FILE: Path = CRON_DIR / "jobs.json"
+CRON_RUNS_DIR: Path = CRON_DIR / "runs"
+
 
 # ---------------------------------------------------------------------------
 # ロギング設定

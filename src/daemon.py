@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ try:
         WEBHOOK_DEFAULT_PORT,
         setup_logging,
     )
+    from .cron import CronScheduler
 except ImportError:
     _pkg_root = str(Path(__file__).parent.parent)
     if _pkg_root not in sys.path:
@@ -50,6 +52,7 @@ except ImportError:
         WEBHOOK_DEFAULT_PORT,
         setup_logging,
     )
+    from src.cron import CronScheduler
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +64,11 @@ class OpenClaudeDaemon:
     """Unix ソケットサーバーとして動作する常駐デーモン。"""
 
     def __init__(self) -> None:
-        """セッション辞書とサーバー状態を初期化する。"""
+        """セッション辞書・サーバー状態・Cron スケジューラを初期化する。"""
         self._sessions: dict[str, str] = self._load_sessions()  # alias → sdk_session_id
         self._server: asyncio.AbstractServer | None = None
         self._shutdown_event = asyncio.Event()
+        self._cron: CronScheduler = CronScheduler(self._execute_for_cron)
 
     async def start(self) -> None:
         """Unix ソケットサーバーを起動し、シャットダウンまで待機する。"""
@@ -84,11 +88,17 @@ class OpenClaudeDaemon:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self._shutdown_event.set)
 
+        # Cron スケジューラを起動
+        await self._cron.start()
+
         _logger.info("OpenClaude daemon started (PID: %d)", os.getpid())
 
         # シャットダウンイベントが発火するまで待機
         async with self._server:
             await self._shutdown_event.wait()
+
+        # Cron スケジューラを停止
+        await self._cron.stop()
 
         # クリーンアップ
         SOCKET_PATH.unlink(missing_ok=True)
@@ -118,6 +128,14 @@ class OpenClaudeDaemon:
                 await self.handle_delete_session(request, writer)
             elif req_type == "stop":
                 await self.handle_stop(writer)
+            elif req_type == "cron_add":
+                await self.handle_cron_add(request, writer)
+            elif req_type == "cron_list":
+                await self.handle_cron_list(writer)
+            elif req_type == "cron_delete":
+                await self.handle_cron_delete(request, writer)
+            elif req_type == "cron_run":
+                await self.handle_cron_run(request, writer)
             else:
                 await self._send_json(writer, {"type": "error", "message": f"Unknown type: {req_type}"})
         except json.JSONDecodeError as e:
@@ -211,11 +229,11 @@ class OpenClaudeDaemon:
     async def _handle_stream_event(
         self,
         message: Any,
-        writer: asyncio.StreamWriter,
+        writer: asyncio.StreamWriter | None,
         full_text: str,
         has_stream_events: bool,
     ) -> tuple[str, bool]:
-        """StreamEvent からテキストチャンクを抽出してストリーミングする。"""
+        """StreamEvent からテキストチャンクを抽出する。writer が指定された場合はストリーミング送信も行う。"""
         event = message.event
         if event.get("type") == "content_block_delta":
             delta = event.get("delta", {})
@@ -224,21 +242,22 @@ class OpenClaudeDaemon:
                 chunk = delta.get("text", "")
                 if chunk:
                     full_text += chunk
-                    await self._send_json(writer, {"type": "chunk", "text": chunk})
+                    if writer is not None:
+                        await self._send_json(writer, {"type": "chunk", "text": chunk})
         return full_text, has_stream_events
 
     async def _handle_assistant_message(
         self,
         message: Any,
-        writer: asyncio.StreamWriter,
+        writer: asyncio.StreamWriter | None,
         has_stream_events: bool,
         full_text: str,
     ) -> tuple[str | None, str]:
         """AssistantMessage からモデル情報を取得する。
 
-        StreamEvent 未着時はフォールバックとして本文テキストをストリーミングする。
+        StreamEvent 未着時はフォールバックとしてテキストを蓄積し、writer が指定された場合は送信もする。
         """
-        from claude_agent_sdk.types import TextBlock
+        from claude_agent_sdk.types import TextBlock  # noqa: PLC0415
 
         current_model: str | None = message.model if hasattr(message, "model") else None
         # StreamEvent が来なかった場合のフォールバック
@@ -246,16 +265,17 @@ class OpenClaudeDaemon:
             for block in message.content:
                 if isinstance(block, TextBlock):
                     full_text += block.text
-                    await self._send_json(writer, {"type": "chunk", "text": block.text})
+                    if writer is not None:
+                        await self._send_json(writer, {"type": "chunk", "text": block.text})
         return current_model, full_text
 
     async def _handle_result_message(
         self,
         message: Any,
-        writer: asyncio.StreamWriter,
+        writer: asyncio.StreamWriter | None,
         current_model: str | None,
     ) -> None:
-        """ResultMessage から完了シグナルを送信する。"""
+        """ResultMessage を処理する。writer が指定された場合は完了シグナルを送信する。"""
         usage = getattr(message, "usage", None) or {}
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
@@ -266,18 +286,19 @@ class OpenClaudeDaemon:
             input_tokens,
             output_tokens,
         )
-        await self._send_json(
-            writer,
-            {
-                "type": "done",
-                "stop_reason": getattr(message, "stop_reason", "end_turn"),
-                "model": current_model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_cost_usd": getattr(message, "total_cost_usd", None),
-                "num_turns": getattr(message, "num_turns", 0),
-            },
-        )
+        if writer is not None:
+            await self._send_json(
+                writer,
+                {
+                    "type": "done",
+                    "stop_reason": getattr(message, "stop_reason", "end_turn"),
+                    "model": current_model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_cost_usd": getattr(message, "total_cost_usd", None),
+                    "num_turns": getattr(message, "num_turns", 0),
+                },
+            )
 
     async def handle_sessions(self, writer: asyncio.StreamWriter) -> None:
         """メモリ上のセッション一覧を JSON で返す。"""
@@ -357,6 +378,113 @@ class OpenClaudeDaemon:
                 "failed": failed,
             },
         )
+
+    # ------------------------------------------------------------------
+    # Cron ハンドラー
+    # ------------------------------------------------------------------
+
+    async def handle_cron_add(self, request: dict[str, Any], writer: asyncio.StreamWriter) -> None:
+        """Cron ジョブを追加する。"""
+        name = request.get("name")
+        schedule = request.get("schedule", "")
+        session_id = request.get("session_id", "main")
+        message = request.get("message", "")
+
+        if not schedule:
+            await self._send_json(writer, {"type": "error", "message": "schedule is required"})
+            return
+        if not message.strip():
+            await self._send_json(writer, {"type": "error", "message": "message is required"})
+            return
+
+        try:
+            job = self._cron.add_job(name=name, schedule=schedule, session_id=session_id, message=message)
+        except ValueError as e:
+            await self._send_json(writer, {"type": "error", "message": f"Invalid cron expression: {e}"})
+            return
+
+        await self._send_json(writer, {"type": "cron_added", **asdict(job)})
+
+    async def handle_cron_list(self, writer: asyncio.StreamWriter) -> None:
+        """Cron ジョブ一覧を返す。"""
+        jobs = [asdict(job) for job in self._cron.list_jobs()]
+        await self._send_json(writer, {"type": "cron_list", "jobs": jobs})
+
+    async def handle_cron_delete(self, request: dict[str, Any], writer: asyncio.StreamWriter) -> None:
+        """Cron ジョブを削除する。"""
+        job_id = request.get("job_id", "")
+        if not job_id:
+            await self._send_json(writer, {"type": "error", "message": "job_id is required"})
+            return
+
+        try:
+            self._cron.delete_job(job_id)
+        except ValueError as e:
+            await self._send_json(writer, {"type": "error", "message": str(e)})
+            return
+
+        await self._send_json(writer, {"type": "cron_deleted", "job_id": job_id})
+
+    async def handle_cron_run(self, request: dict[str, Any], writer: asyncio.StreamWriter) -> None:
+        """Cron ジョブを手動で即時実行する。実行は非同期で開始し、すぐに応答を返す。"""
+        job_id = request.get("job_id", "")
+        if not job_id:
+            await self._send_json(writer, {"type": "error", "message": "job_id is required"})
+            return
+
+        try:
+            await self._cron.run_job_now(job_id)
+        except ValueError as e:
+            await self._send_json(writer, {"type": "error", "message": str(e)})
+            return
+
+        await self._send_json(writer, {"type": "cron_run_started", "job_id": job_id})
+
+    async def _execute_for_cron(self, job_id: str, session_id: str, message: str) -> None:
+        """CronScheduler から呼び出されるジョブ実行コールバック。
+
+        handle_query と同じ claude-agent-sdk 呼び出しロジックを使うが、
+        StreamWriter へのストリーミングの代わりにログ出力のみを行う。
+        実行エラーは例外として raise し、CronScheduler 側で status="error" を記録させる。
+        """
+        try:
+            from claude_agent_sdk import (  # noqa: PLC0415
+                AssistantMessage,
+                ClaudeAgentOptions,
+                ResultMessage,
+                query,
+            )
+            from claude_agent_sdk.types import StreamEvent  # noqa: PLC0415
+        except ImportError as e:
+            raise RuntimeError(f"claude_agent_sdk not installed: {e}") from e
+
+        _logger.info("cron_execute_query: job=%s, session=%s, message_len=%d", job_id, session_id, len(message))
+        sdk_session_id = self._sessions.get(session_id)
+
+        options = ClaudeAgentOptions(
+            setting_sources=["project"],
+            permission_mode="bypassPermissions",
+            cwd=str(BASE_DIR),
+            include_partial_messages=True,
+            resume=sdk_session_id,
+        )
+
+        full_text: str = ""
+        has_stream_events: bool = False
+        current_model: str | None = None
+
+        # writer=None を渡すことで既存ヘルパーを再利用しつつ CLI へのストリーミングを行わない
+        async for msg in query(prompt=message, options=options):
+            if hasattr(msg, "subtype") and msg.subtype == "init":
+                self._handle_init_event(msg, session_id)
+            elif isinstance(msg, StreamEvent):
+                full_text, has_stream_events = await self._handle_stream_event(msg, None, full_text, has_stream_events)
+            elif isinstance(msg, AssistantMessage):
+                current_model, full_text = await self._handle_assistant_message(msg, None, has_stream_events, full_text)
+            elif isinstance(msg, ResultMessage):
+                await self._handle_result_message(msg, None, current_model)
+
+        _logger.info("cron_execute_query result: job=%s, text_len=%d", job_id, len(full_text))
 
     # ------------------------------------------------------------------
     # ヘルパー

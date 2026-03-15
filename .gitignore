@@ -4,6 +4,7 @@ openclaude.sock
 openclaude.pid
 daemon.log
 sessions/
+cron/
 __pycache__/
 *.py[cod]
 *.pyo
