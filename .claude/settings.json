@@ -1,8 +1,12 @@
 {
   "env": {
     // Add environment variables here. These will be available to the agent when it runs.
+    "ANTHROPIC_API_KEY": "your-anthropic-api-key",
+    "CLAUDE_CODE_USE_BEDROCK": "0",
+    "CLAUDE_CODE_USE_VERTEX": "0",
+    "CLAUDE_CODE_USE_FOUNDRY": "0"
   },
   "permissions": {},
   "maxTurns": 20,
-  "autoMemoryEnabled": false // OpenClaude is currently in early development and does not support memory features.
+  "autoMemoryEnabled": false
 }
