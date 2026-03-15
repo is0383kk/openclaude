@@ -13,11 +13,12 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ class OpenClaudeDaemon:
     def __init__(self) -> None:
         """セッション辞書とサーバー状態を初期化する。"""
         self._sessions: dict[str, str] = self._load_sessions()  # alias → sdk_session_id
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server: asyncio.AbstractServer | None = None
         self._shutdown_event = asyncio.Event()
 
     async def start(self) -> None:
@@ -178,7 +179,7 @@ class OpenClaudeDaemon:
             resume=sdk_session_id,
         )
 
-        current_model: Optional[str] = None
+        current_model: str | None = None
         full_text: str = ""
         has_stream_events: bool = False
 
@@ -232,14 +233,14 @@ class OpenClaudeDaemon:
         writer: asyncio.StreamWriter,
         has_stream_events: bool,
         full_text: str,
-    ) -> tuple[Optional[str], str]:
+    ) -> tuple[str | None, str]:
         """AssistantMessage からモデル情報を取得する。
 
         StreamEvent 未着時はフォールバックとして本文テキストをストリーミングする。
         """
         from claude_agent_sdk.types import TextBlock
 
-        current_model: Optional[str] = message.model if hasattr(message, "model") else None
+        current_model: str | None = message.model if hasattr(message, "model") else None
         # StreamEvent が来なかった場合のフォールバック
         if not has_stream_events:
             for block in message.content:
@@ -252,7 +253,7 @@ class OpenClaudeDaemon:
         self,
         message: Any,
         writer: asyncio.StreamWriter,
-        current_model: Optional[str],
+        current_model: str | None,
     ) -> None:
         """ResultMessage から完了シグナルを送信する。"""
         usage = getattr(message, "usage", None) or {}
@@ -271,8 +272,8 @@ class OpenClaudeDaemon:
                 "type": "done",
                 "stop_reason": getattr(message, "stop_reason", "end_turn"),
                 "model": current_model,
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "total_cost_usd": getattr(message, "total_cost_usd", None),
                 "num_turns": getattr(message, "num_turns", 0),
             },
@@ -307,14 +308,11 @@ class OpenClaudeDaemon:
 
         for sdk_session_id in list(self._sessions.values()):
             if sdk_session_id:
-                jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
-                try:
-                    jsonl_path.unlink()
-                    deleted_files.append(jsonl_path.name)
-                except FileNotFoundError:
-                    _logger.debug("cleanup_sessions: JSONL already absent: %s", jsonl_path.name)
-                except Exception as e:
-                    failed_files.append(f"{jsonl_path.name}: {e}")
+                deleted, error = self._delete_session_jsonl(sdk_session_id)
+                if deleted:
+                    deleted_files.append(deleted)
+                if error:
+                    failed_files.append(error)
 
         self._sessions = {}
         self._save_sessions()
@@ -344,17 +342,7 @@ class OpenClaudeDaemon:
             await self._send_json(writer, {"type": "error", "message": f"Session not found: {session_alias}"})
             return
 
-        deleted_file: Optional[str] = None
-        failed: Optional[str] = None
-
-        jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
-        try:
-            jsonl_path.unlink()
-            deleted_file = jsonl_path.name
-        except FileNotFoundError:
-            _logger.debug("delete_session: JSONL already absent: %s", jsonl_path.name)
-        except Exception as e:
-            failed = f"{jsonl_path.name}: {e}"
+        deleted_file, failed = self._delete_session_jsonl(sdk_session_id)
 
         del self._sessions[session_alias]
         self._save_sessions()
@@ -374,10 +362,22 @@ class OpenClaudeDaemon:
     # ヘルパー
     # ------------------------------------------------------------------
 
+    def _delete_session_jsonl(self, sdk_session_id: str) -> tuple[str | None, str | None]:
+        """sdk_session_id に対応する JSONL ファイルを削除して (deleted_name, error_message) を返す。"""
+        jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
+        try:
+            jsonl_path.unlink()
+            return jsonl_path.name, None
+        except FileNotFoundError:
+            _logger.debug("JSONL already absent: %s", jsonl_path.name)
+            return None, None
+        except Exception as e:
+            return None, f"{jsonl_path.name}: {e}"
+
     def _read_session_stats(self, sdk_session_id: str) -> dict[str, Any]:
         """sdk_session_id に対応する JSONL から last_active と total_tokens を返す。"""
         jsonl_path = CLAUDE_PROJECTS_DIR / f"{sdk_session_id}.jsonl"
-        last_active: Optional[str] = None
+        last_active: str | None = None
         total_tokens = 0
 
         try:
@@ -461,11 +461,9 @@ def stop_daemon_process() -> bool:
     Returns:
         停止リクエストの送信に成功した場合は True。
     """
-    import socket as _socket
-
     # まずソケット経由で試みる
     try:
-        sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(5)
         sock.connect(str(SOCKET_PATH))
         sock.sendall((json.dumps({"type": "stop"}) + "\n").encode("utf-8"))
@@ -493,7 +491,7 @@ def stop_daemon_process() -> bool:
     return False
 
 
-def get_daemon_status() -> tuple[str, Optional[int]]:
+def get_daemon_status() -> tuple[str, int | None]:
     """デーモンのステータスと PID を返す。
 
     Returns:

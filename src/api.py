@@ -175,6 +175,11 @@ def _sse_event(data: dict[str, Any]) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _build_query_payload(request: MessageRequest) -> dict[str, Any]:
+    """MessageRequest からデーモンに送信するクエリペイロードを構築する。"""
+    return {"type": "query", "session_id": request.session_id, "message": request.message}
+
+
 async def _stream_message_generator(request: MessageRequest) -> AsyncGenerator[str, None]:
     r"""Unix ソケット経由でデーモンと通信し、SSE イベントを yield する。
 
@@ -191,12 +196,7 @@ async def _stream_message_generator(request: MessageRequest) -> AsyncGenerator[s
         return
 
     try:
-        payload = {
-            "type": "query",
-            "session_id": request.session_id,
-            "message": request.message,
-        }
-        writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        writer.write((json.dumps(_build_query_payload(request), ensure_ascii=False) + "\n").encode("utf-8"))
         await writer.drain()
 
         while True:
@@ -250,7 +250,7 @@ async def post_message(request: MessageRequest) -> MessageResponse:
     Raises:
         HTTPException: デーモンが起動していない場合（503）またはデーモンがエラーを返した場合（500）。
     """
-    response_text = ""
+    chunks: list[str] = []
     done_resp: dict[str, Any] = {}
 
     try:
@@ -259,12 +259,7 @@ async def post_message(request: MessageRequest) -> MessageResponse:
         raise HTTPException(status_code=503, detail=f"Daemon is not running: {e}") from e
 
     try:
-        payload = {
-            "type": "query",
-            "session_id": request.session_id,
-            "message": request.message,
-        }
-        writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        writer.write((json.dumps(_build_query_payload(request), ensure_ascii=False) + "\n").encode("utf-8"))
         await writer.drain()
 
         while True:
@@ -275,7 +270,7 @@ async def post_message(request: MessageRequest) -> MessageResponse:
             resp_type = resp.get("type")
 
             if resp_type == "chunk":
-                response_text += resp.get("text", "")
+                chunks.append(resp.get("text", ""))
             elif resp_type == "done":
                 done_resp = resp
                 break
@@ -287,7 +282,7 @@ async def post_message(request: MessageRequest) -> MessageResponse:
 
     return MessageResponse(
         session_id=request.session_id,
-        response=response_text,
+        response="".join(chunks),
         stop_reason=done_resp.get("stop_reason"),
         model=done_resp.get("model"),
         input_tokens=done_resp.get("input_tokens"),
