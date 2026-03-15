@@ -83,6 +83,18 @@ class OpenClaudeCLI:
                 asyncio.run(self.cmd_sessions_delete(args.session_id))
             else:
                 asyncio.run(self.cmd_sessions())
+        elif args.command == "cron":
+            cron_cmd = getattr(args, "cron_command", None)
+            if cron_cmd == "add":
+                asyncio.run(self.cmd_cron_add(args.schedule, args.name, args.session, args.message))
+            elif cron_cmd == "list":
+                asyncio.run(self.cmd_cron_list())
+            elif cron_cmd == "delete":
+                asyncio.run(self.cmd_cron_delete(args.job_id))
+            elif cron_cmd == "run":
+                asyncio.run(self.cmd_cron_run(args.job_id))
+            else:
+                parser.parse_args(["cron", "--help"])
         else:
             message = self._resolve_message(args.message)
             if message is not None:
@@ -128,6 +140,25 @@ class OpenClaudeCLI:
         sessions_sub.add_parser("cleanup", help="Clean up all sessions")
         delete_parser = sessions_sub.add_parser("delete", help="Delete a specific session")
         delete_parser.add_argument("session_id", metavar="SESSION_ID", help="Session alias to delete")
+
+        cron_parser = subparsers.add_parser("cron", help="Manage cron jobs")
+        cron_sub = cron_parser.add_subparsers(dest="cron_command")
+
+        cron_add_parser = cron_sub.add_parser("add", help="Add a new cron job")
+        cron_add_parser.add_argument("schedule", metavar="CRON", help='5-field cron expression e.g. "0 9 * * *"')
+        cron_add_parser.add_argument("--name", "-n", default=None, metavar="NAME", help="Job display name")
+        cron_add_parser.add_argument(
+            "--session", "-s", default=DEFAULT_SESSION_ID, metavar="SESSION_ID", help="Target session alias"
+        )
+        cron_add_parser.add_argument("--message", "-m", required=True, metavar="MESSAGE", help="Message to send")
+
+        cron_sub.add_parser("list", help="List all cron jobs")
+
+        cron_delete_parser = cron_sub.add_parser("delete", help="Delete a cron job")
+        cron_delete_parser.add_argument("job_id", metavar="JOB_ID", help="Job ID to delete")
+
+        cron_run_parser = cron_sub.add_parser("run", help="Manually trigger a cron job")
+        cron_run_parser.add_argument("job_id", metavar="JOB_ID", help="Job ID to run")
 
         # 会話モード
         parser.add_argument(
@@ -284,6 +315,105 @@ class OpenClaudeCLI:
                 print(f"Deleted session: {session_id}")
                 if response.get("failed"):
                     print(f"  [warn] {response['failed']}", file=sys.stderr)
+            elif response.get("type") == "error":
+                print(f"ERROR: {response.get('message')}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Cron コマンド
+    # ------------------------------------------------------------------
+
+    async def cmd_cron_add(self, schedule: str, name: str | None, session: str, message: str) -> None:
+        """Cron ジョブを追加する。"""
+        if not self._is_daemon_up():
+            print("OpenClaude daemon is not running.")
+            return
+
+        try:
+            response = await self._daemon_request(
+                {"type": "cron_add", "name": name, "schedule": schedule, "session_id": session, "message": message}
+            )
+            if response.get("type") == "cron_added":
+                print(f"Cron job added: {response['id']} ({response['name']})")
+                print(f"  schedule: {response['schedule']}")
+                print(f"  session:  {response['session_id']}")
+                print(f"  message:  {response['message']}")
+            elif response.get("type") == "error":
+                print(f"ERROR: {response.get('message')}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    async def cmd_cron_list(self) -> None:
+        """Cron ジョブ一覧を表示する。"""
+        if not self._is_daemon_up():
+            print("OpenClaude daemon is not running.")
+            return
+
+        try:
+            response = await self._daemon_request({"type": "cron_list"})
+            if response.get("type") == "error":
+                print(f"ERROR: {response.get('message')}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        jobs = response.get("jobs", [])
+        print(f"{_CRAB} OpenClaude Cron Jobs\n")
+        if not jobs:
+            print("No cron jobs registered.")
+            return
+
+        print(f"Jobs: {len(jobs)}\n")
+        col_id = max(max(len(j["id"]) for j in jobs), 8)
+        col_name = max(max(len(j["name"]) for j in jobs), 12)
+        col_sched = max(max(len(j["schedule"]) for j in jobs), 10)
+        col_session = max(max(len(j["session_id"]) for j in jobs), 7)
+        col_status = max(max(len(j.get("last_run_status") or "-") for j in jobs), 6)
+        header = (
+            f"{'id':<{col_id}}  {'name':<{col_name}}  {'schedule':<{col_sched}}  "
+            f"{'session':<{col_session}}  {'status':<{col_status}}  message"
+        )
+        print(header)
+        for j in jobs:
+            msg_preview = j["message"][:40] + ("..." if len(j["message"]) > 40 else "")
+            print(
+                f"{j['id']:<{col_id}}  {j['name']:<{col_name}}  {j['schedule']:<{col_sched}}  "
+                f"{j['session_id']:<{col_session}}  {(j.get('last_run_status') or '-'):<{col_status}}  {msg_preview}"
+            )
+
+    async def cmd_cron_delete(self, job_id: str) -> None:
+        """Cron ジョブを削除する。"""
+        if not self._is_daemon_up():
+            print("OpenClaude daemon is not running.")
+            return
+
+        try:
+            response = await self._daemon_request({"type": "cron_delete", "job_id": job_id})
+            if response.get("type") == "cron_deleted":
+                print(f"Deleted cron job: {job_id}")
+            elif response.get("type") == "error":
+                print(f"ERROR: {response.get('message')}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    async def cmd_cron_run(self, job_id: str) -> None:
+        """Cron ジョブを手動で即時実行する。"""
+        if not self._is_daemon_up():
+            print("OpenClaude daemon is not running.")
+            return
+
+        try:
+            response = await self._daemon_request({"type": "cron_run", "job_id": job_id})
+            if response.get("type") == "cron_run_started":
+                print(f"Cron job started: {job_id}")
             elif response.get("type") == "error":
                 print(f"ERROR: {response.get('message')}", file=sys.stderr)
                 sys.exit(1)
