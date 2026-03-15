@@ -227,6 +227,33 @@ curl -X POST http://localhost:28789/message \
 | `session_id` | セッション ID（省略時は `main`） |
 | `message` | 送信するメッセージ（必須） |
 
+### POST /message/stream
+
+`text/event-stream` 形式でレスポンスをリアルタイムにストリーミングします。
+
+```bash
+curl -N -X POST http://localhost:28789/message/stream \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "main", "message": "こんにちは"}'
+```
+
+レスポンス例（SSE イベントストリーム）:
+
+```
+data: {"type": "chunk", "text": "こんにちは"}
+
+data: {"type": "chunk", "text": "！何かお手伝いできることはありますか？"}
+
+data: {"type": "done", "stop_reason": "end_turn", "model": "...", "input_tokens": 10, "output_tokens": 15, "total_cost_usd": 0.0001, "num_turns": 1}
+
+```
+
+| イベント type | 内容 |
+|---|---|
+| `chunk` | テキストチャンク（`text` フィールドを含む） |
+| `done` | 完了シグナル（`stop_reason`, `model`, `input_tokens`, `output_tokens` 等を含む） |
+| `error` | エラーメッセージ（`message` フィールドを含む） |
+
 ### GET /status
 
 デーモンのステータスと PID を返します。

@@ -4,6 +4,7 @@
 
 エンドポイント:
     POST   /message               メッセージ送信（完全レスポンス）
+    POST   /message/stream        メッセージ送信（SSE ストリーミング）
     GET    /status                デーモンステータスと PID
     GET    /sessions              セッション一覧
     DELETE /sessions              全セッション削除
@@ -20,11 +21,13 @@ import json
 import logging
 import os
 import sys
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 _logger = logging.getLogger(__name__)
@@ -69,6 +72,11 @@ class MessageResponse(BaseModel):
     session_id: str
     response: str
     stop_reason: str | None = None
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_cost_usd: float | None = None
+    num_turns: int | None = None
 
 
 class SessionInfo(BaseModel):
@@ -155,6 +163,80 @@ async def _request_daemon(payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _sse_event(data: dict[str, Any]) -> str:
+    r"""Dict を SSE イベント文字列に変換する。
+
+    Args:
+        data: SSE イベントのペイロード。
+
+    Returns:
+        `data: {...}\\n\\n` 形式の SSE イベント文字列。
+    """
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _stream_message_generator(request: MessageRequest) -> AsyncGenerator[str, None]:
+    r"""Unix ソケット経由でデーモンと通信し、SSE イベントを yield する。
+
+    Args:
+        request: セッション ID とメッセージを含むリクエスト。
+
+    Yields:
+        SSE フォーマットの文字列（`data: {...}\n\n`）。
+    """
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+    except (FileNotFoundError, ConnectionRefusedError) as e:
+        yield _sse_event({"type": "error", "message": f"Daemon is not running: {e}"})
+        return
+
+    try:
+        payload = {
+            "type": "query",
+            "session_id": request.session_id,
+            "message": request.message,
+        }
+        writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        await writer.drain()
+
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+            resp = json.loads(line.decode("utf-8").strip())
+            resp_type = resp.get("type")
+
+            if resp_type == "chunk":
+                yield _sse_event({"type": "chunk", "text": resp.get("text", "")})
+            elif resp_type == "done":
+                yield _sse_event(resp)
+                break
+            elif resp_type == "error":
+                yield _sse_event({"type": "error", "message": resp.get("message", "Unknown error")})
+                break
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@app.post("/message/stream")
+async def post_message_stream(request: MessageRequest) -> StreamingResponse:
+    r"""デーモンにメッセージを転送し、SSE ストリーミングでレスポンスを返す。
+
+    Args:
+        request: セッション ID とメッセージを含むリクエスト。
+
+    Returns:
+        SSE ストリーミングレスポンス（`text/event-stream`）。
+        各イベントは `data: {...}\n\n` 形式で、type は `chunk` / `done` / `error`。
+    """
+    return StreamingResponse(
+        _stream_message_generator(request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/message")
 async def post_message(request: MessageRequest) -> MessageResponse:
     """デーモンにメッセージを転送し、完全なレスポンスを返す。
@@ -169,7 +251,7 @@ async def post_message(request: MessageRequest) -> MessageResponse:
         HTTPException: デーモンが起動していない場合（503）またはデーモンがエラーを返した場合（500）。
     """
     response_text = ""
-    stop_reason: str | None = None
+    done_resp: dict[str, Any] = {}
 
     try:
         reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
@@ -195,7 +277,7 @@ async def post_message(request: MessageRequest) -> MessageResponse:
             if resp_type == "chunk":
                 response_text += resp.get("text", "")
             elif resp_type == "done":
-                stop_reason = resp.get("stop_reason")
+                done_resp = resp
                 break
             elif resp_type == "error":
                 raise HTTPException(status_code=500, detail=resp.get("message", "Unknown error"))
@@ -206,7 +288,12 @@ async def post_message(request: MessageRequest) -> MessageResponse:
     return MessageResponse(
         session_id=request.session_id,
         response=response_text,
-        stop_reason=stop_reason,
+        stop_reason=done_resp.get("stop_reason"),
+        model=done_resp.get("model"),
+        input_tokens=done_resp.get("input_tokens"),
+        output_tokens=done_resp.get("output_tokens"),
+        total_cost_usd=done_resp.get("total_cost_usd"),
+        num_turns=done_resp.get("num_turns"),
     )
 
 
