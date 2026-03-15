@@ -43,6 +43,7 @@ except ImportError:
     from src.daemon import get_daemon_status, start_daemon_process, stop_daemon_process
 
 _CRAB = "🦀"
+_logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -258,14 +259,7 @@ class OpenClaudeCLI:
             return
 
         try:
-            reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
-            writer.write((json.dumps({"type": "cleanup_sessions"}) + "\n").encode("utf-8"))
-            await writer.drain()
-
-            response = await self._read_json(reader)
-            writer.close()
-            await writer.wait_closed()
-
+            response = await self._daemon_request({"type": "cleanup_sessions"})
             if response.get("type") == "cleanup_done":
                 count = response.get("deleted_count", 0)
                 print(f"Cleaned up {count} session(s).")
@@ -285,14 +279,7 @@ class OpenClaudeCLI:
             return
 
         try:
-            reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
-            writer.write((json.dumps({"type": "delete_session", "session_id": session_id}) + "\n").encode("utf-8"))
-            await writer.drain()
-
-            response = await self._read_json(reader)
-            writer.close()
-            await writer.wait_closed()
-
+            response = await self._daemon_request({"type": "delete_session", "session_id": session_id})
             if response.get("type") == "delete_done":
                 print(f"Deleted session: {session_id}")
                 if response.get("failed"):
@@ -310,14 +297,7 @@ class OpenClaudeCLI:
             return []
 
         try:
-            reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
-            writer.write((json.dumps({"type": "sessions"}) + "\n").encode("utf-8"))
-            await writer.drain()
-
-            response = await self._read_json(reader)
-            writer.close()
-            await writer.wait_closed()
-
+            response = await self._daemon_request({"type": "sessions"})
             if response.get("type") == "sessions_list":
                 return cast(list[dict[str, Any]], response.get("sessions", []))
             return []
@@ -382,7 +362,7 @@ class OpenClaudeCLI:
                     sys.exit(1)
 
                 else:
-                    logging.getLogger(__name__).debug("cmd_message: unknown response type: %s", resp_type)
+                    _logger.debug("cmd_message: unknown response type: %s", resp_type)
 
         finally:
             writer.close()
@@ -412,6 +392,17 @@ class OpenClaudeCLI:
     def _is_daemon_up(self) -> bool:
         status, _ = get_daemon_status()
         return status == "running"
+
+    async def _daemon_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Unix ソケット経由でデーモンに JSON リクエストを送信し、単一レスポンスを返す。"""
+        reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+        try:
+            writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            await writer.drain()
+            return await self._read_json(reader)
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     async def _read_json(self, reader: asyncio.StreamReader) -> dict[str, Any]:
         line = await reader.readline()
